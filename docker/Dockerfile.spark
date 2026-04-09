@@ -1,0 +1,4 @@
+FROM bitnami/spark:3.3.0
+USER root
+RUN pip install pandas pyarrow scikit-learn
+USER 1001

@@ -1,143 +1,7 @@
-#!/usr/bin/env python3
-# ============================================================================
-# SPARK STRUCTURED STREAMING - SILVER LAYER PROCESSING
-# Real-time Data Processing: Kafka → 1-min Window Aggregation → ML Inference
-# Outputs: PostgreSQL (hot) + HDFS Parquet (cold)
-#!/usr/bin/env python3
-import logging
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import (
-    col, from_json, window, first, last, min as spark_min, max as spark_max,
-    sum as spark_sum, to_timestamp, current_timestamp
-)
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-KAFKA_BROKERS = "kafka-0:29092,kafka-1:29093,kafka-2:29094"
-KAFKA_TOPIC = "crypto_ticks"
-PG_HOST = "postgres"
-PG_PORT = "5432"
-PG_DB = "cryptopipeline"
-PG_USER = "crypto_user"
-PG_PASSWORD = "crypto_password"
-HDFS_OUTPUT_PATH = "hdfs://namenode:9000/silver/crypto/ohlcv-1m"
-
-schema = StructType([
-    StructField("timestamp", LongType()),
-    StructField("product_id", StringType()),
-    StructField("price", DoubleType()),
-    StructField("size", DoubleType()),
-    StructField("ask", DoubleType()),
-    StructField("bid", DoubleType()),
-    StructField("side", StringType()),
-    StructField("sequence", LongType()),
-    StructField("ingestion_timestamp", LongType()),
-])
-
-def write_to_postgres(batch_df, batch_id):
-    """Write batch to PostgreSQL"""
-    try:
-        batch_df.write \
-            .format("jdbc") \
-            .mode("append") \
-            .option("url", f"jdbc:postgresql://{PG_HOST}:{PG_PORT}/{PG_DB}") \
-            .option("dbtable", "gold.gold_crypto_ohlcv") \
-            .option("user", PG_USER) \
-            .option("password", PG_PASSWORD) \
-            .option("driver", "org.postgresql.Driver") \
-            .save()
-        logger.info(f"Batch {batch_id}: {batch_df.count()} rows written to PostgreSQL")
-    except Exception as e:
-        logger.error(f"Error writing to PostgreSQL: {e}")
-
-def write_to_hdfs(batch_df, batch_id):
-    """Write batch to HDFS"""
-    try:
-        batch_df.write \
-            .format("parquet") \
-            .mode("append") \
-            .option("compression", "snappy") \
-            .save(HDFS_OUTPUT_PATH)
-        logger.info(f"Batch {batch_id}: {batch_df.count()} rows written to HDFS")
-    except Exception as e:
-        logger.error(f"Error writing to HDFS: {e}")
-
-def main():
-    spark = SparkSession.builder \
-        .appName("crypto-streaming") \
-        .master("spark://spark-master:7077") \
-        .config("spark.sql.execution.arrow.maxRecordsPerBatch", "10000") \
-        .getOrCreate()
-
-    logger.info("Reading from Kafka...")
-    df_kafka = spark.readStream \
-        .format("kafka") \
-        .option("kafka.bootstrap.servers", KAFKA_BROKERS) \
-        .option("subscribe", KAFKA_TOPIC) \
-        .option("startingOffsets", "latest") \
-        .load()
-
-    logger.info("Deserializing JSON...")
-    df_parsed = df_kafka.select(
-        from_json(col("value").cast("string"), schema).alias("data")
-    ).select("data.*")
-
-    logger.info("Converting timestamp...")
-    df_parsed = df_parsed.withColumn(
-        "event_time", 
-        to_timestamp(col("timestamp") / 1000.0)
-    )
-
-    logger.info("Applying 1-minute windowing with watermarking...")
-    df_windowed = df_parsed.withWatermark("event_time", "1 minute") \
-        .groupBy(
-            window(col("event_time"), "1 minute"),
-            col("product_id")
-        ) \
-        .agg(
-            first(col("price")).alias("open"),
-            spark_max(col("price")).alias("high"),
-            spark_min(col("price")).alias("low"),
-            last(col("price")).alias("close"),
-            spark_sum(col("size")).alias("volume"),
-            current_timestamp().alias("processed_time")
-        ) \
-        .select(
-            col("window.start").alias("timestamp"),
-            col("product_id"),
-            col("open"), col("high"), col("low"), col("close"), col("volume"),
-            col("processed_time")
-        )
-
-    logger.info("Starting PostgreSQL sink...")
-    query_pg = df_windowed.writeStream \
-        .foreachBatch(write_to_postgres) \
-        .outputMode("append") \
-        .option("checkpointLocation", "/checkpoint/postgres") \
-        .trigger(processingTime="30 seconds") \
-        .start()
-
-    logger.info("Starting HDFS sink...")
-    query_hdfs = df_windowed.writeStream \
-        .foreachBatch(write_to_hdfs) \
-        .outputMode("append") \
-        .option("checkpointLocation", "/checkpoint/hdfs") \
-        .trigger(processingTime="30 seconds") \
-        .start()
-
-    logger.info("Streaming pipeline active...")
-    spark.streams.awaitAnyTermination()
-
-if __name__ == "__main__":
-    main()
-
-import os
+﻿import os
 import sys
 import logging
 import pickle
-from typing import Any, Callable
 from datetime import datetime
 
 import pandas as pd
@@ -152,8 +16,6 @@ from pyspark.sql.types import (
     StructType, StructField, StringType, DoubleType, 
     LongType, TimestampType, IntegerType
 )
-from pyspark.ml.feature import VectorAssembler
-import pyspark.pandas as ps_pandas
 
 # ============================================================================
 # CONFIGURATION
@@ -202,38 +64,38 @@ def create_spark_session() -> SparkSession:
     Returns:
         Configured SparkSession
     """
-    spark = SparkSession.builder \
-        .appName("crypto-streaming-pipeline") \
-        .master("spark://spark-master:7077") \
-        .config("spark.executor.memory", "2g") \
-        .config("spark.executor.cores", "2") \
-        .config("spark.driver.memory", "1g") \
-        .config("spark.sql.streaming.schemaInference", "true") \
-        .config("spark.sql.streaming.checkpointLocation", CHECKPOINT_DIR_QUERY) \
-        .config("spark.sql.adaptive.enabled", "true") \
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
-        .config("spark.sql.adaptive.skewJoin.enabled", "true") \
-        \
-        # ⭐ CRITICAL: Arrow optimization to prevent OOM
-        .config("spark.sql.execution.arrow.enabled", "true") \
-        .config("spark.sql.execution.arrow.maxRecordsPerBatch", str(MAX_RECORDS_PER_BATCH)) \
-        .config("spark.sql.execution.arrow.fallback.enabled", "true") \
-        \
-        # DataFrame cache optimization
-        .config("spark.sql.execution.useLegacyStringGrouping", "false") \
-        .config("spark.shuffle.partitions", "8") \
-        \
-        # Kafka source configuration
-        .config("spark.sql.kafka.minBatchOffsetRangePerTrigger", "500") \
-        \
-        # Database drivers
-        .config("spark.jars.packages", 
-                "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,"
-                "org.postgresql:postgresql:42.3.1") \
+    spark = (
+        SparkSession.builder
+        .appName("crypto-streaming-pipeline")
+        .master("spark://spark-master:7077")
+        .config("spark.executor.memory", "2g")
+        .config("spark.executor.cores", "2")
+        .config("spark.driver.memory", "1g")
+        .config("spark.sql.streaming.schemaInference", "true")
+        .config("spark.sql.streaming.checkpointLocation", CHECKPOINT_DIR_QUERY)
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        .config("spark.sql.adaptive.skewJoin.enabled", "true")
+        # Critical: Arrow optimization to prevent OOM
+        .config("spark.sql.execution.arrow.enabled", "true")
+        .config("spark.sql.execution.arrow.maxRecordsPerBatch", str(MAX_RECORDS_PER_BATCH))
+        .config("spark.sql.execution.arrow.fallback.enabled", "true")
+        # DataFrame and shuffle settings
+        .config("spark.sql.execution.useLegacyStringGrouping", "false")
+        .config("spark.shuffle.partitions", "8")
+        # Kafka source tuning
+        .config("spark.sql.kafka.minBatchOffsetRangePerTrigger", "500")
+        # Runtime jars
+        .config(
+            "spark.jars.packages",
+            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,"
+            "org.postgresql:postgresql:42.3.1",
+        )
         .getOrCreate()
+    )
     
     spark.sparkContext.setLogLevel("WARN")
-    logger.info("✓ Spark session created successfully")
+    logger.info("[OK] Spark session created successfully")
     return spark
 
 # ============================================================================
@@ -249,8 +111,8 @@ def read_kafka_stream(spark: SparkSession) -> DataFrame:
     Returns:
         DataFrame with Kafka messages
     """
-    logger.info(f"🔗 Connecting to Kafka brokers: {KAFKA_BROKERS}")
-    logger.info(f"📋 Subscribing to topic: {KAFKA_TOPIC}")
+    logger.info(f"[KAFKA] Connecting to brokers: {KAFKA_BROKERS}")
+    logger.info(f"[TOPIC] Subscribing: {KAFKA_TOPIC}")
     
     df_kafka = spark.readStream \
         .format("kafka") \
@@ -263,11 +125,11 @@ def read_kafka_stream(spark: SparkSession) -> DataFrame:
         .option("maxOffsetsPerTrigger", str(MAX_RECORDS_PER_BATCH)) \
         .load()
     
-    logger.info("✓ Kafka source configured")
+    logger.info("[OK] Kafka source configured")
     return df_kafka
 
 # ============================================================================
-# AVRO DESERIALIZATION (Bronze → Raw data)
+# AVRO DESERIALIZATION (Bronze -> Raw data)
 # ============================================================================
 def deserialize_avro(spark: SparkSession, df: DataFrame) -> DataFrame:
     """
@@ -308,7 +170,7 @@ def deserialize_avro(spark: SparkSession, df: DataFrame) -> DataFrame:
         .withColumn("event_time", (col("timestamp") / 1000).cast(TimestampType())) \
         .withColumn("ingestion_time", (col("ingestion_timestamp") / 1000).cast(TimestampType()))
     
-    logger.info("✓ Avro deserialization configured")
+    logger.info("[OK] Avro deserialization configured")
     return df_deserialized
 
 # ============================================================================
@@ -324,10 +186,10 @@ def apply_windowing(df: DataFrame) -> DataFrame:
     Returns:
         DataFrame with 1-minute windowed aggregations
     """
-    # ⭐ Watermarking: Allow late data within 1 minute after window close
+    # Watermarking: Allow late data within 1 minute after window close
     df_watermarked = df.withWatermark("event_time", "1 minute")
     
-    # ⭐ Windowing: 1-minute tumbling window (no sliding)
+    # Windowing: 1-minute tumbling window (no sliding)
     df_windowed = df_watermarked \
         .groupBy(
             window(col("event_time"), "1 minute", "1 minute").alias("window_time"),
@@ -353,7 +215,7 @@ def apply_windowing(df: DataFrame) -> DataFrame:
             col("volatility"),
         )
     
-    logger.info("✓ Windowing and watermarking applied (1-min tumbling window, 1-min watermark)")
+    logger.info("[OK] Windowing and watermarking applied (1-min tumbling window, 1-min watermark)")
     return df_windowed
 
 # ============================================================================
@@ -388,7 +250,7 @@ def compute_technical_indicators(df: DataFrame) -> DataFrame:
             lit(None)  # Placeholder: RSI requires more complex logic
         )
     
-    logger.info("✓ Technical indicators computed (MA_5, MA_20, RSI_14)")
+    logger.info("[OK] Technical indicators computed (MA_5, MA_20, RSI_14)")
     return df_features
 
 # ============================================================================
@@ -407,14 +269,14 @@ def load_ml_model(model_path: str = "/models/crypto_predictor_v1.pkl"):
     try:
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
-        logger.info(f"✓ ML model loaded from {model_path}")
+        logger.info(f"[OK] ML model loaded from {model_path}")
         return model
     except FileNotFoundError:
-        logger.warning(f"⚠️  Model not found at {model_path}, using dummy model")
+        logger.warning(f"[WARN] Model not found at {model_path}, using dummy model")
         # Return None; inference will skip or use dummy predictions
         return None
     except Exception as e:
-        logger.error(f"✗ Error loading model: {e}")
+        logger.error(f"[ERROR] Error loading model: {e}")
         return None
 
 # Load model globally (once at startup)
@@ -422,7 +284,7 @@ ML_MODEL = load_ml_model()
 
 def predict_direction_udf(batch_df: pd.DataFrame) -> pd.DataFrame:
     """
-    ⭐ PANDAS UDF for batch ML inference (vectorized across partitions).
+    PANDAS UDF for batch ML inference (vectorized across partitions).
     
     This function is called once per batch (not per row), operating on a Pandas DataFrame.
     Arrow serialization automatically handles conversion to/from PySpark DataFrames.
@@ -460,7 +322,7 @@ def predict_direction_udf(batch_df: pd.DataFrame) -> pd.DataFrame:
         })
         
     except Exception as e:
-        logger.error(f"✗ Error in UDF: {e}")
+        logger.error(f"[ERROR] Error in UDF: {e}")
         # Return default values on error
         return pd.DataFrame({
             "predicted_direction": ["NEUTRAL"] * len(batch_df),
@@ -472,7 +334,7 @@ def apply_ml_inference(spark: SparkSession, df: DataFrame) -> DataFrame:
     """
     Apply ML inference using Pandas UDF.
     
-    ⭐ CRITICAL CONFIG: spark.sql.execution.arrow.maxRecordsPerBatch
+    CRITICAL CONFIG: spark.sql.execution.arrow.maxRecordsPerBatch
     Limits records per batch to prevent OOM (set to 10000 in main)
     
     Args:
@@ -482,7 +344,7 @@ def apply_ml_inference(spark: SparkSession, df: DataFrame) -> DataFrame:
     Returns:
         DataFrame with prediction columns added
     """
-    from pyspark.sql.functions import pandas_udf, PandasUDFType
+    from pyspark.sql.functions import pandas_udf
     from pyspark.sql.types import StructType, StructField, StringType, DoubleType
     
     # Define output schema for Pandas UDF
@@ -494,7 +356,26 @@ def apply_ml_inference(spark: SparkSession, df: DataFrame) -> DataFrame:
     
     # Register Pandas UDF
     @pandas_udf(prediction_schema)
-    def predict_batch(batch_df: pd.DataFrame) -> pd.DataFrame:
+    def predict_batch(
+        open_s: pd.Series,
+        high_s: pd.Series,
+        low_s: pd.Series,
+        close_s: pd.Series,
+        volume_s: pd.Series,
+        ma_5m_s: pd.Series,
+        ma_20m_s: pd.Series,
+    ) -> pd.DataFrame:
+        batch_df = pd.DataFrame(
+            {
+                "open": open_s,
+                "high": high_s,
+                "low": low_s,
+                "close": close_s,
+                "volume": volume_s,
+                "ma_5m": ma_5m_s,
+                "ma_20m": ma_20m_s,
+            }
+        )
         return predict_direction_udf(batch_df)
     
     # Apply Pandas UDF using groupby map
@@ -502,10 +383,13 @@ def apply_ml_inference(spark: SparkSession, df: DataFrame) -> DataFrame:
     df_predictions = df.withColumn(
         "predictions",
         predict_batch(
-            struct(
-                col("open"), col("high"), col("low"), col("close"),
-                col("volume"), col("ma_5m"), col("ma_20m")
-            )
+            col("open"),
+            col("high"),
+            col("low"),
+            col("close"),
+            col("volume"),
+            col("ma_5m"),
+            col("ma_20m"),
         )
     ) \
     .select(
@@ -516,7 +400,7 @@ def apply_ml_inference(spark: SparkSession, df: DataFrame) -> DataFrame:
     ) \
     .drop("predictions")
     
-    logger.info("✓ ML inference (Pandas UDF) applied")
+    logger.info("[OK] ML inference (Pandas UDF) applied")
     return df_predictions
 
 # ============================================================================
@@ -551,7 +435,7 @@ def prepare_for_postgres(df: DataFrame) -> DataFrame:
 
 def write_to_postgres(batch_df: DataFrame, batch_id: int) -> None:
     """
-    ⭐ Write batch to PostgreSQL using foreachBatch.
+    Write batch to PostgreSQL using foreachBatch.
     
     This callback is invoked once per micro-batch.
     
@@ -576,10 +460,10 @@ def write_to_postgres(batch_df: DataFrame, batch_id: int) -> None:
             .save()
         
         count = batch_df.count()
-        logger.info(f"✓ Batch {batch_id}: {count} rows written to PostgreSQL")
+        logger.info(f"[OK] Batch {batch_id}: {count} rows written to PostgreSQL")
         
     except Exception as e:
-        logger.error(f"✗ Error writing to PostgreSQL (batch {batch_id}): {e}")
+        logger.error(f"[ERROR] Error writing to PostgreSQL (batch {batch_id}): {e}")
         # Implement dead-letter queue or retry logic here
         raise
 
@@ -621,10 +505,10 @@ def write_to_hdfs_batch(batch_df: DataFrame, batch_id: int) -> None:
             .save(HDFS_OUTPUT_PATH)
         
         count = batch_df.count()
-        logger.info(f"✓ Batch {batch_id}: {count} rows written to HDFS ({HDFS_OUTPUT_PATH})")
+        logger.info(f"[OK] Batch {batch_id}: {count} rows written to HDFS ({HDFS_OUTPUT_PATH})")
         
     except Exception as e:
-        logger.error(f"✗ Error writing to HDFS (batch {batch_id}): {e}")
+        logger.error(f"[ERROR] Error writing to HDFS (batch {batch_id}): {e}")
         raise
 
 # ============================================================================
@@ -635,7 +519,7 @@ def main():
     Main entry point for Spark Structured Streaming pipeline.
     """
     print("=" * 80)
-    print("🚀 REAL-TIME CRYPTO DATA PIPELINE - SPARK STREAMING PROCESSOR")
+    print("[START] REAL-TIME CRYPTO DATA PIPELINE - SPARK STREAMING PROCESSOR")
     print("=" * 80)
     print(f"Configuration:")
     print(f"  Kafka Brokers: {KAFKA_BROKERS}")
@@ -652,25 +536,25 @@ def main():
         
         # Stage 1: Read from Kafka (Bronze)
         df_bronze = read_kafka_stream(spark)
-        logger.info("✓ Bronze layer (Kafka) configured")
+        logger.info("[OK] Bronze layer (Kafka) configured")
         
         # Stage 2: Deserialize Avro
         df_raw = deserialize_avro(spark, df_bronze)
-        logger.info("✓ Avro deserialization configured")
+        logger.info("[OK] Avro deserialization configured")
         
         # Stage 3: Apply windowing & watermarking
         df_windowed = apply_windowing(df_raw)
-        logger.info("✓ Windowing & watermarking configured")
+        logger.info("[OK] Windowing & watermarking configured")
         
         # Stage 4: Feature engineering
         df_features = compute_technical_indicators(df_windowed)
-        logger.info("✓ Feature engineering configured")
+        logger.info("[OK] Feature engineering configured")
         
         # Stage 5: ML inference (Pandas UDF)
         df_predictions = apply_ml_inference(spark, df_features)
-        logger.info("✓ ML inference (Pandas UDF) configured")
+        logger.info("[OK] ML inference (Pandas UDF) configured")
         
-        # ⭐ BRANCH 1: PostgreSQL (Hot path)
+        # BRANCH 1: PostgreSQL (Hot path)
         df_postgres = prepare_for_postgres(df_predictions)
         query_postgres = df_postgres \
             .writeStream \
@@ -678,9 +562,9 @@ def main():
             .option("checkpointLocation", f"{CHECKPOINT_DIR_QUERY}/postgres") \
             .trigger(processingTime=f"{PROCESSING_TIME_SECONDS} seconds") \
             .start()
-        logger.info("✓ PostgreSQL streaming write started")
+        logger.info("[OK] PostgreSQL streaming write started")
         
-        # ⭐ BRANCH 2: HDFS (Cold path)
+        # BRANCH 2: HDFS (Cold path)
         df_hdfs = prepare_for_hdfs(df_predictions)
         query_hdfs = df_hdfs \
             .writeStream \
@@ -688,20 +572,21 @@ def main():
             .option("checkpointLocation", f"{CHECKPOINT_DIR_QUERY}/hdfs") \
             .trigger(processingTime=f"{PROCESSING_TIME_SECONDS} seconds") \
             .start()
-        logger.info("✓ HDFS streaming write started")
+        logger.info("[OK] HDFS streaming write started")
         
         # Wait for termination
-        logger.info("⏳ Streaming pipeline active... Press Ctrl+C to stop")
+        logger.info("[RUNNING] Streaming pipeline active... Press Ctrl+C to stop")
         spark.streams.awaitAnyTermination()
         
     except Exception as e:
-        logger.error(f"✗ Pipeline error: {e}", exc_info=True)
+        logger.error(f"[ERROR] Pipeline error: {e}", exc_info=True)
         return 1
     finally:
-        logger.info("🛑 Streaming pipeline stopped")
+        logger.info("[STOP] Streaming pipeline stopped")
         spark.stop()
         
     return 0
 
 if __name__ == "__main__":
     sys.exit(main())
+

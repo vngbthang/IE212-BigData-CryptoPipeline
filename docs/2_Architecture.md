@@ -1,44 +1,81 @@
-﻿# 🏗️ 2. Thiết kế kiến trúc (ADD)
+﻿# 🏗️ 2. Thiết kế Kiến trúc (ADD)
 
-## 1. Tổng thể hệ thống
-Hệ thống chạy pseudo-distributed bằng Docker Compose gồm:
-- Zookeeper, Kafka (3 brokers)
-- Spark (1 master, 2 workers)
-- Hadoop (NameNode, DataNode)
-- PostgreSQL, Airflow, Streamlit
+## 1. Tổng quan hệ thống
+Cụm triển khai gồm Zookeeper, Kafka đa broker, Spark Master-Workers, PostgreSQL, HDFS, Airflow và Streamlit. Luồng chính là streaming liên tục; luồng phụ là batch ban đêm cho bảo trì dữ liệu.
 
 ## 2. Data Flow theo Medallion
 
-### 2.1 Bronze Layer
-- Python producer kết nối Coinbase WebSocket.
-- Parse JSON tick -> serialize (Avro) -> publish Kafka topic `crypto_ticks`.
-- Message key là `product_id` để giữ thứ tự event theo cặp giao dịch.
+### Bronze Layer
+- Producer Python kết nối Coinbase WebSocket.
+- Lọc bản tin ticker, chuẩn hóa dữ liệu theo schema 9 trường.
+- Publish vào Kafka topic crypto_ticks với key product_id.
 
-### 2.2 Silver Layer
-- Spark Structured Streaming đọc từ Kafka.
-- Áp dụng watermark 1 phút để xử lý late data.
-- Áp dụng tumbling window 1 phút để tạo OHLCV.
-- Tạo feature kỹ thuật và chạy Pandas UDF (Arrow) cho ML inference.
+### Silver Layer
+- Spark Structured Streaming đọc Kafka và parse payload.
+- Chuyển timestamp sang event_time.
+- Áp dụng watermark 1 phút và window 1 phút để tạo OHLCV.
+- Thực thi inference bằng Pandas UDF với Arrow.
+- Ghi song song sang PostgreSQL và HDFS.
 
-### 2.3 Gold Layer
-- Nhánh Hot: append vào PostgreSQL (partition theo ngày).
-- Nhánh Cold: ghi Parquet lên HDFS để lưu lịch sử.
+### Gold Layer
+- PostgreSQL lưu dữ liệu phục vụ truy vấn nhanh cho BI.
+- HDFS Parquet lưu lịch sử phục vụ phân tích dài hạn và batch maintenance.
+
+### BI Layer
+- Streamlit truy vấn bảng Gold để dựng biểu đồ nến và chỉ số vận hành.
+- Truy vấn latest-record ưu tiên mẫu DISTINCT ON theo symbol.
 
 ## 3. Orchestration
-- Airflow chạy nightly batch:
-  - Compaction file nhỏ trên HDFS bằng `repartition(n)` động.
-  - Tuyệt đối không dùng `coalesce(1)`.
+Airflow điều phối tác vụ ban đêm:
+- Compaction file nhỏ HDFS bằng repartition động theo khối lượng dữ liệu.
+- Không sử dụng coalesce(1) để tránh bottleneck một task.
 
-## 4. BI Layer
-- Streamlit truy vấn PostgreSQL.
-- Ưu tiên câu truy vấn dạng `SELECT DISTINCT ON` cho bản ghi mới nhất mỗi symbol.
+## 4. Các Quyết Định Thiết Kế & Đánh Đổi (Design Decisions & Trade-offs)
 
-## 5. Reliability & vận hành
-- Spark checkpoint để recover trạng thái streaming.
-- Producer/Spark có xử lý exception mạng và shutdown an toàn.
-- Logging theo mức INFO/WARN/ERROR để phục vụ debug nhanh.
+### 4.1 PostgreSQL PARTITION BY RANGE và Composite Index
+Quyết định:
+- Bảng gold_crypto_ohlcv được partition theo RANGE trên ngày của timestamp.
+- Tạo composite index trọng yếu:
+  - symbol, timestamp giảm dần
+  - timestamp giảm dần, symbol
+- Tạo thêm partial index cho quality_status và predicted_direction khác null.
 
-## 6. Cấu hình bắt buộc
-- `spark.sql.execution.arrow.maxRecordsPerBatch=10000`.
-- Trigger micro-batch ổn định, phù hợp tài nguyên máy.
-- Kafka replication >= 3 trong mô hình giả lập nhiều broker.
+Lý do:
+- Dữ liệu chuỗi thời gian tăng nhanh, partition theo ngày giúp retention, vacuum, backup và prune partition hiệu quả.
+- Composite index tối ưu truy vấn dạng latest-by-symbol, DISTINCT ON, range-scan theo thời gian.
+- Partial index giảm kích thước index, tăng tốc truy vấn dashboard có điều kiện.
+
+Đánh đổi:
+- Tăng độ phức tạp quản trị partition.
+- Tăng chi phí ghi do duy trì nhiều index.
+
+### 4.2 Watermark 1 phút và giới hạn Arrow batch 10000
+Quyết định:
+- Watermark event_time là 1 phút.
+- spark.sql.execution.arrow.maxRecordsPerBatch đặt 10000 cho Pandas UDF.
+
+Lý do:
+- Watermark 1 phút cân bằng giữa độ đầy đủ dữ liệu và độ trễ đầu ra, chấp nhận late event trong biên xử lý.
+- Giới hạn batch Arrow ở 10000 giảm nguy cơ OOM khi chuyển đổi Spark sang Pandas trong inference.
+
+Đánh đổi:
+- Watermark lớn hơn có thể tăng độ trễ kết quả đóng cửa sổ.
+- Batch nhỏ hơn an toàn bộ nhớ nhưng tăng overhead số lần gọi UDF.
+
+### 4.3 Chiến lược reconnect của Producer
+Quan sát hiện trạng:
+- Producer dùng WebSocketApp.run_forever với callback on_error và on_close.
+- Chưa có lớp exponential backoff tường minh trong mã hiện tại.
+
+Lý do chọn hiện trạng:
+- Cấu trúc đơn giản, triển khai nhanh, phù hợp giai đoạn prototype.
+- Dễ theo dõi lỗi qua logging.
+
+Đánh đổi:
+- Thiếu kiểm soát reconnect nâng cao khi mạng chập chờn dài hạn.
+- Nên bổ sung backoff theo cấp số nhân và jitter ở phiên bản tiếp theo để tăng tính production-grade.
+
+## 5. Ràng buộc kỹ thuật bắt buộc
+- Bật Arrow và khóa maxRecordsPerBatch=10000 cho luồng có Pandas UDF.
+- Compaction HDFS phải dùng repartition động, không dùng coalesce(1).
+- Toàn pipeline cần xử lý lỗi mạng và shutdown an toàn.
