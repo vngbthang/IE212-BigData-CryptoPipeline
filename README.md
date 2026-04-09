@@ -14,14 +14,14 @@ Pipeline xử lý dữ liệu **crypto thời gian thực** theo kiến trúc **
 
 ```mermaid
 flowchart LR
-	A[Coinbase WebSocket] --> B[Python Producer\nAvro Schema + Retry]
-	B --> C[Kafka\nTopic: crypto_ticks]
-	C --> D[Spark Structured Streaming\nWatermark 1m + Window 1m]
-	D --> E[ML Inference\nPandas UDF + Arrow]
-	E --> F[PostgreSQL\nGold Hot Storage]
-	E --> G[HDFS Parquet\nCold Storage]
-	H[Airflow Nightly Jobs\nCompaction with repartition(n)] --> G
-	F --> I[Streamlit Dashboard\nSELECT DISTINCT ON]
+    A[Coinbase WebSocket] --> B[Python Producer<br>Avro Schema + Retry]
+    B --> C[Kafka<br>Topic: crypto_ticks]
+    C --> D[Spark Structured Streaming<br>Watermark 1m + Window 1m]
+    D --> E[ML Inference<br>Pandas UDF + Arrow]
+    E --> F[PostgreSQL<br>Gold Hot Storage]
+    E --> G[HDFS Parquet<br>Cold Storage]
+    H[Airflow Nightly Jobs<br>Compaction with repartition] --> G
+    F --> I[Streamlit Dashboard<br>SELECT DISTINCT ON]
 ```
 
 ## Vì sao thiết kế này đúng hướng
