@@ -24,8 +24,6 @@ flowchart LR
     F --> I[Streamlit Dashboard<br>SELECT DISTINCT ON]
 ```
 
-## Vì sao thiết kế này đúng hướng
-
 ### Bronze Layer (Ingestion)
 - Producer nhận ticker realtime từ Coinbase.
 - Chuẩn hóa record theo schema và publish vào Kafka.
