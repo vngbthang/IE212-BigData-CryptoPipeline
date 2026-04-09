@@ -24,6 +24,6 @@ Lớp orchestration dùng Airflow chạy tác vụ compaction ban đêm, ưu ti�
 4. Mở dashboard: http://localhost:8501
 
 ## Tài liệu chi tiết
-1. ./docs/1_SRS.md
-2. ./docs/2_Architecture.md
-3. ./docs/3_WBS_Plan.md
+- [SRS Document](./docs/1_SRS.md)
+- [System Architecture](./docs/2_Architecture.md)
+- [WBS Plan](./docs/3_WBS_Plan.md)
