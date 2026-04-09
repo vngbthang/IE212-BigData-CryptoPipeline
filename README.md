@@ -54,7 +54,7 @@ flowchart LR
 
 ```bash
 docker-compose up -d
-python src/producer/producer.py
+python src/ingestion/producer.py
 spark-submit --master spark://localhost:7077 src/spark/stream_processor.py
 ```
 
