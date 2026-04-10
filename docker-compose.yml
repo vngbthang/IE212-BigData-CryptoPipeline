@@ -44,7 +44,8 @@ services:
     environment:
       KAFKA_BROKER_ID: 0
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-0:29092,PLAINTEXT_HOST://kafka-0:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-0:9092,PLAINTEXT_HOST://kafka-0:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
@@ -75,12 +76,13 @@ services:
       zookeeper:
         condition: service_healthy
     ports:
-      - "9093:9093"
+      - "9093:9092"
       - "29093:29093"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:29093,PLAINTEXT_HOST://kafka-1:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092,PLAINTEXT_HOST://kafka-1:29093
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
@@ -110,12 +112,13 @@ services:
       zookeeper:
         condition: service_healthy
     ports:
-      - "9094:9094"
+      - "9094:9092"
       - "29094:29094"
     environment:
       KAFKA_BROKER_ID: 2
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:29094,PLAINTEXT_HOST://kafka-2:9094
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092,PLAINTEXT_HOST://kafka-2:29094
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
@@ -221,6 +224,8 @@ services:
       dockerfile: docker/Dockerfile.spark
     container_name: spark-master
     hostname: spark-master
+    user: "root"
+    mem_limit: 1g
     depends_on:
       - kafka-0
       - kafka-1
@@ -230,22 +235,19 @@ services:
       - "8080:8080"      # Spark Master UI
       - "7077:7077"      # Spark Master port
       - "4040:4040"      # Spark Application UI
-    environment:
-      SPARK_MODE: master
-      SPARK_MASTER_HOST: spark-master
-      SPARK_MASTER_PORT: 7077
-      SPARK_MASTER_WEBUI_PORT: 8080
-      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
-      SPARK_RPC_ENCRYPTION_ENABLED: "no"
-      SPARK_SSL_ENABLED: "no"
-      # Memory & CPU
-      SPARK_DRIVER_MEMORY: 2g
-      SPARK_DRIVER_CORES: 2
     volumes:
-      - spark-master-data:/bitnami/spark
-      - ./src/spark:/app/spark_jobs
+      - ./src:/app/src
     networks:
       - crypto-network
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+      - --port
+      - "7077"
+      - --webui-port
+      - "8080"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080"]
       interval: 10s
@@ -258,24 +260,26 @@ services:
       dockerfile: docker/Dockerfile.spark
     container_name: spark-worker-1
     hostname: spark-worker-1
+    user: "root"
+    mem_limit: 1g
     depends_on:
       - spark-master
     ports:
       - "8081:8081"      # Worker UI
-    environment:
-      SPARK_MODE: worker
-      SPARK_MASTER_URL: spark://spark-master:7077
-      SPARK_WORKER_WEBUI_PORT: 8081
-      SPARK_WORKER_CORES: 2
-      SPARK_WORKER_MEMORY: 2g
-      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
-      SPARK_RPC_ENCRYPTION_ENABLED: "no"
-      SPARK_SSL_ENABLED: "no"
     volumes:
-      - spark-worker-1-data:/bitnami/spark
-      - ./src/spark:/app/spark_jobs
+      - ./src:/app/src
     networks:
       - crypto-network
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --webui-port
+      - "8081"
+      - --cores
+      - "2"
+      - --memory
+      - 1g
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8081"]
       interval: 10s
@@ -417,7 +421,7 @@ services:
   producer:
     build:
       context: .
-      dockerfile: docker/Dockerfile.producer
+      dockerfile: Dockerfile.producer
     container_name: crypto-producer
     hostname: crypto-producer
     depends_on:
@@ -425,41 +429,41 @@ services:
       - kafka-1
       - kafka-2
     environment:
-      KAFKA_BROKERS: kafka-0:29092,kafka-1:29093,kafka-2:29094
+      KAFKA_BROKERS: kafka-0:9092,kafka-1:9092,kafka-2:9092
       KAFKA_TOPIC: crypto_ticks
       LOG_LEVEL: INFO
     volumes:
-      - ./src/ingestion:/app/ingestion
+      - ./src/producer:/app
       - ./logs:/app/logs
     networks:
       - crypto-network
-    command: python /app/ingestion/producer.py
+    command: python /app/producer.py
 
   # ========================================================================
   # STREAMLIT DASHBOARD - Visualization Layer (Gold)
   # ========================================================================
-  streamlit:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.streamlit
-    container_name: crypto-dashboard
-    hostname: crypto-dashboard
-    ports:
-      - "8501:8501"
-    depends_on:
-      - postgres
-    environment:
-      PG_HOST: postgres
-      PG_PORT: 5432
-      PG_DB: cryptopipeline
-      PG_USER: crypto_user
-      PG_PASSWORD: crypto_password
-    volumes:
-      - ./src/dashboard:/app/dashboard
-      - streamlit-cache:/home/appuser/.streamlit
-    networks:
-      - crypto-network
-    command: streamlit run /app/dashboard/app.py --server.port=8501
+#  streamlit:
+#    build:
+#      context: .
+#      dockerfile: docker/Dockerfile.streamlit
+#    container_name: crypto-dashboard
+#    hostname: crypto-dashboard
+#    ports:
+#      - "8501:8501"
+#    depends_on:
+#      - postgres
+#    environment:
+#      PG_HOST: postgres
+#      PG_PORT: 5432
+#      PG_DB: cryptopipeline
+#      PG_USER: crypto_user
+#      PG_PASSWORD: crypto_password
+#    volumes:
+#      - ./src/dashboard:/app/dashboard
+#      - streamlit-cache:/home/appuser/.streamlit
+#    networks:
+#      - crypto-network
+#    command: streamlit run /app/dashboard/app.py --server.port=8501
 
 # ============================================================================
 # VOLUMES - Persistent storage for each service
