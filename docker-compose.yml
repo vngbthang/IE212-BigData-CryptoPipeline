@@ -322,24 +322,30 @@ services:
   postgres:
     image: postgres:12-alpine
     container_name: postgres
-    hostname: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin123}
+      POSTGRES_DB: ${POSTGRES_DB:-crypto_db}
     ports:
       - "5432:5432"
-    environment:
-      POSTGRES_DB: cryptopipeline
-      POSTGRES_USER: crypto_user
-      POSTGRES_PASSWORD: crypto_password
-      POSTGRES_INITDB_ARGS: "-c shared_buffers=256MB -c max_connections=200"
     volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./sql/init.sql:/docker-entrypoint-initdb.d/01_init.sql
-    networks:
-      - crypto-network
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d
+    command: 
+      - "postgres"
+      - "-c"
+      - "max_connections=200" 
+      - "-c"
+      - "shared_buffers=256MB" 
+      - "-c"
+      - "wal_level=logical" 
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U crypto_user -d cryptopipeline"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-admin} -d $${POSTGRES_DB:-crypto_db}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - crypto-network
 
   # ========================================================================
   # APACHE AIRFLOW - Orchestration & Batch Jobs
@@ -418,26 +424,45 @@ services:
   # ========================================================================
   # PYTHON PRODUCER - Ingestion Layer (Bronze)
   # ========================================================================
-  producer:
+  producer-mock:
     build:
       context: .
       dockerfile: Dockerfile.producer
-    container_name: crypto-producer
-    hostname: crypto-producer
+    container_name: crypto-producer-mock
+    hostname: crypto-producer-mock
+    profiles: ["dev"]
     depends_on:
       - kafka-0
-      - kafka-1
-      - kafka-2
     environment:
       KAFKA_BROKERS: kafka-0:9092,kafka-1:9092,kafka-2:9092
       KAFKA_TOPIC: crypto_ticks
-      LOG_LEVEL: INFO
+      PRODUCER_MODE: "mock"
+      INTERVAL_SECONDS: 1
     volumes:
-      - ./src/producer:/app
+      - ./src:/app/src
       - ./logs:/app/logs
     networks:
       - crypto-network
-    command: python /app/producer.py
+
+  producer-coinbase:
+    build:
+      context: .
+      dockerfile: Dockerfile.producer
+    container_name: crypto-producer-coinbase
+    hostname: crypto-producer-coinbase
+    profiles: ["prod"]
+    depends_on:
+      - kafka-0
+    environment:
+      KAFKA_BROKERS: kafka-0:9092,kafka-1:9092,kafka-2:9092
+      KAFKA_TOPIC: crypto_ticks
+      PRODUCER_MODE: "prod"
+      LOG_LEVEL: INFO
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
+    networks:
+      - crypto-network
 
   # ========================================================================
   # STREAMLIT DASHBOARD - Visualization Layer (Gold)
@@ -484,6 +509,7 @@ volumes:
   airflow-logs:
   airflow-plugins:
   streamlit-cache:
+  postgres_data:
 
 # ============================================================================
 # NETWORKS - Communication bridge between services
