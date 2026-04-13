@@ -46,14 +46,21 @@ CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv (
     quality_status data_quality_status DEFAULT 'VALID',
     data_source VARCHAR(50) DEFAULT 'kafka',
     
+    -- [NEW] Observability: Latency & Lineage Tracking
+    ingest_timestamp TIMESTAMPTZ NOT NULL,  -- When first tick arrived at Kafka
+    process_timestamp TIMESTAMPTZ NOT NULL,  -- When Spark processed this batch
+    display_timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- When inserted to DB
+    record_count INTEGER NOT NULL DEFAULT 1,  -- How many raw ticks in this 1-min bucket
+    error_flag BOOLEAN DEFAULT FALSE,  -- TRUE if any record malformed
+    error_messages TEXT,  -- Comma-separated error codes
+    source_partition INTEGER,  -- Kafka partition source
+    source_offset BIGINT,  -- Kafka offset for traceability
+    
     -- Metadata
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
-    PRIMARY KEY (symbol, timestamp)
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) 
-PARTITION BY RANGE (CAST(timestamp AS DATE))
-WITH (fillfactor=90);  -- Reserve 10% space for HOT updates
+PARTITION BY RANGE (CAST(timestamp AS DATE));
 
 -- ============================================================================
 -- 3.1 CREATE WEEKLY PARTITIONS (Example: 4 weeks)
@@ -83,7 +90,7 @@ FOR VALUES FROM ('2026-04-22') TO ('2026-04-29');
 -- ============================================================================
 -- ⭐ PRIMARY COMPOSITE INDEX: (symbol, timestamp DESC)
 -- Used for: Time-series queries, range scans, DISTINCT ON queries
-CREATE UNIQUE INDEX IF NOT EXISTS idx_symbol_timestamp_desc 
+CREATE INDEX IF NOT EXISTS idx_symbol_timestamp_desc 
 ON gold.gold_crypto_ohlcv (symbol, timestamp DESC);
 
 -- ⭐ SECONDARY COMPOSITE INDEX: (timestamp DESC, symbol)
@@ -108,6 +115,20 @@ CREATE INDEX IF NOT EXISTS idx_predictions
 ON gold.gold_crypto_ohlcv (timestamp DESC, symbol, predicted_direction)
 WHERE predicted_direction IS NOT NULL;
 
+-- [NEW] INDEXES FOR OBSERVABILITY & LATENCY TRACKING
+-- ⭐ LATENCY TRACKING INDEX: For KPI queries on ingest-to-display latency
+CREATE INDEX IF NOT EXISTS idx_latency_ingest_timestamp 
+ON gold.gold_crypto_ohlcv (ingest_timestamp DESC);
+
+-- ⭐ ERROR FILTERING INDEX: For data quality monitoring
+CREATE INDEX IF NOT EXISTS idx_error_flag 
+ON gold.gold_crypto_ohlcv (error_flag) 
+WHERE error_flag = TRUE;
+
+-- ⭐ DISPLAY TIMESTAMP INDEX: For recent data queries (dashboard refresh)
+CREATE INDEX IF NOT EXISTS idx_display_timestamp 
+ON gold.gold_crypto_ohlcv (display_timestamp DESC);
+
 -- ============================================================================
 -- 4. PREDICTIONS TABLE (Separate table for ML predictions)
 -- ============================================================================
@@ -126,12 +147,9 @@ CREATE TABLE IF NOT EXISTS gold.gold_predictions (
     
     -- Data provenance
     prediction_source VARCHAR(50) DEFAULT 'pandas_udf',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
-    PRIMARY KEY (symbol, timestamp)
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
-PARTITION BY RANGE (CAST(timestamp AS DATE))
-WITH (fillfactor=90);
+PARTITION BY RANGE (CAST(timestamp AS DATE));
 
 -- Partitions for predictions table (same as ohlcv)
 CREATE TABLE IF NOT EXISTS gold.gold_predictions_2026_04_01 
@@ -315,7 +333,7 @@ CREATE OR REPLACE FUNCTION gold.get_ohlcv_range(
     p_end_date DATE
 )
 RETURNS TABLE (
-    timestamp TIMESTAMP,
+    "timestamp" TIMESTAMP,
     open NUMERIC,
     high NUMERIC,
     low NUMERIC,
@@ -352,7 +370,7 @@ CREATE OR REPLACE FUNCTION gold.calculate_sma(
     p_days INT DEFAULT 30
 )
 RETURNS TABLE (
-    timestamp TIMESTAMP,
+    "timestamp" TIMESTAMP,
     sma NUMERIC
 ) AS $$
 BEGIN
@@ -380,7 +398,125 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================================================
--- 10. GRANTS (User permissions)
+-- 10. KPI & MONITORING FUNCTIONS (Phase 3 - New)
+-- ============================================================================
+
+-- KPI 1: Records per minute (last 5 minutes) - for throughput monitoring
+CREATE OR REPLACE FUNCTION gold.get_throughput_last_5min() 
+RETURNS TABLE(
+    minute TIMESTAMP,
+    record_count BIGINT,
+    avg_latency_ms NUMERIC,
+    records_per_sec NUMERIC
+) AS $$
+SELECT 
+    DATE_TRUNC('minute', timestamp) AS minute,
+    COUNT(*) as record_count,
+    ROUND(AVG(EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000)::NUMERIC, 2) AS avg_latency_ms,
+    ROUND((COUNT(*)::NUMERIC / 60), 2) AS records_per_sec
+FROM gold.gold_crypto_ohlcv
+WHERE timestamp >= NOW() - INTERVAL '5 minutes'
+GROUP BY DATE_TRUNC('minute', timestamp)
+ORDER BY minute DESC;
+$$ LANGUAGE SQL;
+
+-- KPI 2: Data quality metrics (last 1 hour)
+CREATE OR REPLACE FUNCTION gold.get_data_quality_metrics() 
+RETURNS TABLE(
+    total_records BIGINT,
+    valid_records BIGINT,
+    error_records BIGINT,
+    null_price_count BIGINT,
+    null_size_count BIGINT,
+    error_rate NUMERIC,
+    valid_rate NUMERIC
+) AS $$
+SELECT 
+    COUNT(*) AS total_records,
+    COUNT(*) FILTER (WHERE error_flag = FALSE) AS valid_records,
+    COUNT(*) FILTER (WHERE error_flag = TRUE) AS error_records,
+    COUNT(*) FILTER (WHERE close IS NULL) AS null_price_count,
+    COUNT(*) FILTER (WHERE volume IS NULL) AS null_size_count,
+    ROUND((COUNT(*) FILTER (WHERE error_flag = TRUE)::NUMERIC / NULLIF(COUNT(*), 0)) * 100, 2) AS error_rate,
+    ROUND((COUNT(*) FILTER (WHERE error_flag = FALSE)::NUMERIC / NULLIF(COUNT(*), 0)) * 100, 2) AS valid_rate
+FROM gold.gold_crypto_ohlcv
+WHERE timestamp >= NOW() - INTERVAL '1 hour';
+$$ LANGUAGE SQL;
+
+-- KPI 3: Ingest-to-display latency percentiles (last 1 hour)
+CREATE OR REPLACE FUNCTION gold.get_latency_percentiles() 
+RETURNS TABLE(
+    p50_ms NUMERIC,
+    p75_ms NUMERIC,
+    p95_ms NUMERIC,
+    p99_ms NUMERIC,
+    max_ms NUMERIC,
+    min_ms NUMERIC,
+    avg_ms NUMERIC
+) AS $$
+SELECT
+    ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000)::NUMERIC, 2) AS p50_ms,
+    ROUND(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000)::NUMERIC, 2) AS p75_ms,
+    ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000)::NUMERIC, 2) AS p95_ms,
+    ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000)::NUMERIC, 2) AS p99_ms,
+    ROUND(MAX(EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000)::NUMERIC, 2) AS max_ms,
+    ROUND(MIN(EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000)::NUMERIC, 2) AS min_ms,
+    ROUND(AVG(EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000)::NUMERIC, 2) AS avg_ms
+FROM gold.gold_crypto_ohlcv
+WHERE timestamp >= NOW() - INTERVAL '1 hour'
+  AND error_flag = FALSE;
+$$ LANGUAGE SQL;
+
+-- KPI 4: Data freshness (seconds since last update)
+CREATE OR REPLACE FUNCTION gold.get_data_freshness() 
+RETURNS TABLE(
+    freshness_sec NUMERIC,
+    last_update_timestamp TIMESTAMP,
+    first_record_timestamp TIMESTAMP,
+    total_records_hour BIGINT
+) AS $$
+SELECT 
+    ROUND(EXTRACT(EPOCH FROM (NOW() - MAX(timestamp)))::NUMERIC, 1) AS freshness_sec,
+    MAX(timestamp) AS last_update_timestamp,
+    MIN(timestamp) AS first_record_timestamp,
+    COUNT(*) AS total_records_hour
+FROM gold.gold_crypto_ohlcv
+WHERE timestamp >= NOW() - INTERVAL '1 hour';
+$$ LANGUAGE SQL;
+
+-- KPI 5: Per-symbol performance metrics
+CREATE OR REPLACE FUNCTION gold.get_symbol_performance(p_symbol VARCHAR DEFAULT NULL) 
+RETURNS TABLE(
+    symbol VARCHAR,
+    record_count BIGINT,
+    avg_price NUMERIC,
+    current_price NUMERIC,
+    high_price NUMERIC,
+    low_price NUMERIC,
+    price_change_pct NUMERIC,
+    avg_volume NUMERIC,
+    avg_latency_ms NUMERIC
+) AS $$
+SELECT 
+    symbol,
+    COUNT(*) as record_count,
+    ROUND(AVG(close)::NUMERIC, 8) as avg_price,
+    (array_agg(close ORDER BY timestamp DESC))[1] as current_price,
+    MAX(high) as high_price,
+    MIN(low) as low_price,
+    ROUND(((array_agg(close ORDER BY timestamp DESC))[1] - (array_agg(close ORDER BY timestamp ASC))[1]) / 
+           (array_agg(close ORDER BY timestamp ASC))[1] * 100, 2) as price_change_pct,
+    ROUND(AVG(volume)::NUMERIC, 8) as avg_volume,
+    ROUND(AVG(EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000)::NUMERIC, 2) as avg_latency_ms
+FROM gold.gold_crypto_ohlcv
+WHERE (p_symbol IS NULL OR symbol = p_symbol)
+  AND timestamp >= NOW() - INTERVAL '1 hour'
+GROUP BY symbol
+ORDER BY symbol;
+$$ LANGUAGE SQL;
+
+-- ============================================================================
+-- 11. GRANTS (User permissions)
 -- ============================================================================
 GRANT ALL PRIVILEGES ON SCHEMA gold TO crypto_user;
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA gold TO crypto_user;
@@ -388,8 +524,11 @@ GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA gold TO crypto_user;
 GRANT USAGE ON TYPE price_direction TO crypto_user;
 GRANT USAGE ON TYPE data_quality_status TO crypto_user;
 
+-- Grant execute on all functions
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA gold TO crypto_user;
+
 -- ============================================================================
--- 11. COMMENTS (Documentation)
+-- 12. COMMENTS (Documentation)
 -- ============================================================================
 COMMENT ON TABLE gold.gold_crypto_ohlcv IS 
 'Partitioned table storing 1-minute OHLCV candlesticks for crypto trading pairs. 
@@ -413,7 +552,7 @@ COMMENT ON INDEX gold.idx_predictions IS
 Speeds up prediction-based queries significantly.';
 
 -- ============================================================================
--- 12. SAMPLE DATA (For testing - will be loaded via Spark streaming)
+-- 13. SAMPLE DATA (For testing - will be loaded via Spark streaming)
 -- ============================================================================
 -- Data will be inserted via Spark streaming producer
 -- This section is left empty as production data comes from Kafka → Spark
