@@ -2,8 +2,29 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir kafka-python
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    librdkafka-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY src/producer/producer.py /app/producer.py
+RUN pip install --no-cache-dir \
+    kafka-python \
+    confluent-kafka \
+    avro \
+    websocket-client
 
-CMD ["python", "/app/producer.py"]
+COPY src/ /app/src/
+
+ENV PRODUCER_MODE="mock"
+
+CMD if [ "$PRODUCER_MODE" = "prod" ]; then \
+        echo "======================================"; \
+        echo "🚀 Running PRODUCTION (Coinbase) mode..."; \
+        echo "======================================"; \
+        python /app/src/ingestion/coinbase_producer.py; \
+    else \
+        echo "======================================"; \
+        echo "🛠️ Running DEV (Mock) mode..."; \
+        echo "======================================"; \
+        python /app/src/producer/producer.py; \
+    fi
