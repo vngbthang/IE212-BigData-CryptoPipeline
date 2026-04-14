@@ -329,7 +329,6 @@ services:
       POSTGRES_DB: cryptopipeline
       POSTGRES_USER: crypto_user
       POSTGRES_PASSWORD: crypto_password
-      POSTGRES_INITDB_ARGS: "-c shared_buffers=256MB -c max_connections=200"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./sql/init.sql:/docker-entrypoint-initdb.d/01_init.sql
@@ -429,41 +428,61 @@ services:
       - kafka-1
       - kafka-2
     environment:
-      KAFKA_BROKERS: kafka-0:9092,kafka-1:9092,kafka-2:9092
-      KAFKA_TOPIC: crypto_ticks
-      LOG_LEVEL: INFO
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka-0:9092,kafka-1:9092,kafka-2:9092}
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-crypto_ticks}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      INTERVAL_SECONDS: ${INTERVAL_SECONDS:-1}
+      CRYPTO_MODE: ${CRYPTO_MODE:-dev}
     volumes:
       - ./src/producer:/app
+      - ./src/ingestion:/app/ingestion
       - ./logs:/app/logs
     networks:
       - crypto-network
-    command: python /app/producer.py
+    command: >
+      /bin/bash -c "
+        if [ '${CRYPTO_MODE}' = 'prod' ]; then
+          echo '[PRODUCER] Starting REAL Coinbase producer (prod mode)'
+          python /app/ingestion/producer.py
+        else
+          echo '[PRODUCER] Starting MOCK producer (dev mode)'
+          python /app/producer.py
+        fi
+      "
 
   # ========================================================================
-  # STREAMLIT DASHBOARD - Visualization Layer (Gold)
+  # STREAMLIT DASHBOARD - Visualization Layer (Gold) - Optional Profile
   # ========================================================================
-#  streamlit:
-#    build:
-#      context: .
-#      dockerfile: docker/Dockerfile.streamlit
-#    container_name: crypto-dashboard
-#    hostname: crypto-dashboard
-#    ports:
-#      - "8501:8501"
-#    depends_on:
-#      - postgres
-#    environment:
-#      PG_HOST: postgres
-#      PG_PORT: 5432
-#      PG_DB: cryptopipeline
-#      PG_USER: crypto_user
-#      PG_PASSWORD: crypto_password
-#    volumes:
-#      - ./src/dashboard:/app/dashboard
-#      - streamlit-cache:/home/appuser/.streamlit
-#    networks:
-#      - crypto-network
-#    command: streamlit run /app/dashboard/app.py --server.port=8501
+  streamlit:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.streamlit
+    container_name: crypto-dashboard
+    hostname: crypto-dashboard
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: cryptopipeline
+      DB_USER: crypto_user
+      DB_PASSWORD: crypto_password
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      STREAMLIT_SERVER_PORT: 8501
+    volumes:
+      - ./src/dashboard:/app/dashboard
+      - streamlit-cache:/home/appuser/.streamlit
+    networks:
+      - crypto-network
+    command: streamlit run /app/dashboard/app.py --server.port=8501
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 # ============================================================================
 # VOLUMES - Persistent storage for each service
