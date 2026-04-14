@@ -7,7 +7,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import (
     col, from_json, window, current_timestamp,
     min as spark_min, max as spark_max, last, sum as spark_sum,
-    count, first, lit, when, concat_ws
+    count, first, lit, when, concat_ws, to_timestamp, coalesce, regexp_replace
 )
 from pyspark.sql.types import StringType, StructField, StructType
 from pyspark.sql.types import DecimalType, TimestampType, BooleanType, IntegerType, LongType
@@ -82,7 +82,16 @@ def parse_tick_payload(raw_df: DataFrame, schema: StructType) -> DataFrame:
             col("payload.type").alias("type"),
             col("payload.product_id").alias("product_id"),
             col("payload.price").cast(DecimalType(18, 8)).alias("price"),
-            col("payload.time").cast(TimestampType()).alias("time"),
+            coalesce(
+                col("payload.time").cast(TimestampType()),
+                to_timestamp(
+                    regexp_replace(
+                        regexp_replace(col("payload.time"), "T", " "),
+                        "Z$",
+                        ""
+                    )
+                )
+            ).alias("time"),
             col("payload.size").cast(DecimalType(18, 8)).alias("size"),
             col("partition").alias("source_partition"),
             col("offset").alias("source_offset"),
@@ -189,6 +198,7 @@ def write_to_postgres(ohlcv_df: DataFrame, epoch_id: int):
             .option("dbtable", "gold.gold_crypto_ohlcv") \
             .option("user", DB_USER) \
             .option("password", DB_PASSWORD) \
+            .option("driver", "org.postgresql.Driver") \
             .option("batchsize", 1000) \
             .option("isolationLevel", "READ_COMMITTED") \
             .save()
