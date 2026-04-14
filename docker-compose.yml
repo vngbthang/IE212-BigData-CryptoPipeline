@@ -1,13 +1,11 @@
 # ============================================================================
-# REAL-TIME CRYPTO DATA PIPELINE - DOCKER COMPOSE
-# Medallion Architecture: Bronze (Kafka) → Silver (Spark) → Gold (PostgreSQL)
+# REAL-TIME CRYPTO DATA PIPELINE - DOCKER COMPOSE (FINAL MERGE)
+# Medallion Architecture: Bronze (Kafka) → Silver (Spark) → Gold (Postgres)
 # ============================================================================
 
 services:
 
-  # ========================================================================
-  # ZOOKEEPER - Coordination Service for Kafka & HDFS
-  # ========================================================================
+  # Coordination Service
   zookeeper:
     image: confluentinc/cp-zookeeper:7.3.0
     container_name: zookeeper
@@ -28,9 +26,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ========================================================================
-  # KAFKA BROKERS (3 nodes for replication & fault tolerance)
-  # ========================================================================
+  # Kafka Brokers
   kafka-0:
     image: confluentinc/cp-kafka:7.3.0
     container_name: kafka-0
@@ -51,13 +47,6 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
       KAFKA_MIN_INSYNC_REPLICAS: 2
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
-      KAFKA_LOG_RETENTION_HOURS: 168  # 7 days
-      KAFKA_LOG_SEGMENT_BYTES: 1073741824  # 1GB
-      KAFKA_COMPRESSION_TYPE: snappy
-      KAFKA_NUM_NETWORK_THREADS: 8
-      KAFKA_SOCKET_SEND_BUFFER_BYTES: 102400
-      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES: 102400
-      KAFKA_SOCKET_REQUEST_MAX_BYTES: 104857600
     volumes:
       - kafka-0-data:/var/lib/kafka/data
     networks:
@@ -85,24 +74,10 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092,PLAINTEXT_HOST://kafka-1:29093
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
-      KAFKA_MIN_INSYNC_REPLICAS: 2
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
-      KAFKA_LOG_RETENTION_HOURS: 168
-      KAFKA_LOG_SEGMENT_BYTES: 1073741824
-      KAFKA_COMPRESSION_TYPE: snappy
-      KAFKA_NUM_NETWORK_THREADS: 8
-      KAFKA_SOCKET_SEND_BUFFER_BYTES: 102400
-      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES: 102400
     volumes:
       - kafka-1-data:/var/lib/kafka/data
     networks:
       - crypto-network
-    healthcheck:
-      test: ["CMD", "kafka-broker-api-versions.sh", "--bootstrap-server=localhost:9093"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   kafka-2:
     image: confluentinc/cp-kafka:7.3.0
@@ -121,42 +96,25 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092,PLAINTEXT_HOST://kafka-2:29094
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
-      KAFKA_MIN_INSYNC_REPLICAS: 2
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
-      KAFKA_LOG_RETENTION_HOURS: 168
-      KAFKA_LOG_SEGMENT_BYTES: 1073741824
-      KAFKA_COMPRESSION_TYPE: snappy
-      KAFKA_NUM_NETWORK_THREADS: 8
-      KAFKA_SOCKET_SEND_BUFFER_BYTES: 102400
-      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES: 102400
     volumes:
       - kafka-2-data:/var/lib/kafka/data
     networks:
       - crypto-network
-    healthcheck:
-      test: ["CMD", "kafka-broker-api-versions.sh", "--bootstrap-server=localhost:9094"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
-  # ========================================================================
-  # HADOOP HDFS - Distributed Storage for Silver/Gold layers
-  # ========================================================================
+  # Hadoop HDFS
   namenode:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
     container_name: namenode
     hostname: namenode
     ports:
-      - "9870:9870"  # NameNode UI
-      - "9000:9000"  # HDFS port
+      - "9870:9870"
+      - "9000:9000"
     environment:
       CLUSTER_NAME: "crypto-cluster"
       CORE_SITE_XML_hadoop_tmp_dir: /hadoop/tmp
       HDFS_CONF_dfs_namenode_name_dir: file:///hadoop/dfs/name
       HDFS_CONF_dfs_datanode_data_dir: file:///hadoop/dfs/data
       HDFS_CONF_dfs_replication: 2
-      HDFS_CONF_dfs_namenode_checkpoint_dir: file:///hadoop/dfs/namesecondary
     volumes:
       - namenode-data:/hadoop/dfs/name
     networks:
@@ -175,7 +133,7 @@ services:
       namenode:
         condition: service_healthy
     ports:
-      - "9864:9864"  # DataNode UI
+      - "9864:9864"
     environment:
       SERVICE_PRECONDITION: "namenode:9000"
       CORE_SITE_XML_hadoop_tmp_dir: /hadoop/tmp
@@ -185,11 +143,6 @@ services:
       - datanode-1-data:/hadoop/dfs/data
     networks:
       - crypto-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9864"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   datanode-2:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
@@ -209,15 +162,8 @@ services:
       - datanode-2-data:/hadoop/dfs/data
     networks:
       - crypto-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9865"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
-  # ========================================================================
-  # SPARK MASTER & WORKERS - Stream Processing Cluster
-  # ========================================================================
+  # Spark Cluster
   spark-master:
     build:
       context: .
@@ -225,34 +171,18 @@ services:
     container_name: spark-master
     hostname: spark-master
     user: "root"
-    mem_limit: 1g
     depends_on:
       - kafka-0
-      - kafka-1
-      - kafka-2
       - namenode
     ports:
-      - "8080:8080"      # Spark Master UI
-      - "7077:7077"      # Spark Master port
-      - "4040:4040"      # Spark Application UI
+      - "8080:8080"
+      - "7077:7077"
+      - "4040:4040"
     volumes:
       - ./src:/app/src
     networks:
       - crypto-network
-    command:
-      - /opt/spark/bin/spark-class
-      - org.apache.spark.deploy.master.Master
-      - --host
-      - spark-master
-      - --port
-      - "7077"
-      - --webui-port
-      - "8080"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master", "--port", "7077", "--webui-port", "8080"]
 
   spark-worker-1:
     build:
@@ -261,30 +191,15 @@ services:
     container_name: spark-worker-1
     hostname: spark-worker-1
     user: "root"
-    mem_limit: 1g
     depends_on:
       - spark-master
     ports:
-      - "8081:8081"      # Worker UI
+      - "8081:8081"
     volumes:
       - ./src:/app/src
     networks:
       - crypto-network
-    command:
-      - /opt/spark/bin/spark-class
-      - org.apache.spark.deploy.worker.Worker
-      - spark://spark-master:7077
-      - --webui-port
-      - "8081"
-      - --cores
-      - "2"
-      - --memory
-      - 1g
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077", "--webui-port", "8081", "--cores", "2", "--memory", "1g"]
 
   spark-worker-2:
     build:
@@ -300,60 +215,39 @@ services:
       SPARK_MODE: worker
       SPARK_MASTER_URL: spark://spark-master:7077
       SPARK_WORKER_WEBUI_PORT: 8082
-      SPARK_WORKER_CORES: 2
-      SPARK_WORKER_MEMORY: 2g
-      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
-      SPARK_RPC_ENCRYPTION_ENABLED: "no"
-      SPARK_SSL_ENABLED: "no"
     volumes:
       - spark-worker-2-data:/bitnami/spark
-      - ./src/spark:/app/spark_jobs
+      - ./src:/app/src
     networks:
       - crypto-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8082"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
-  # ========================================================================
-  # PostgreSQL - Gold Layer Storage (Partitioned tables, Composite indexes)
-  # ========================================================================
+  # Storage Layer (Gold)
   postgres:
     image: postgres:12-alpine
     container_name: postgres
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin123}
-      POSTGRES_DB: ${POSTGRES_DB:-crypto_db}
+    hostname: postgres
     ports:
       - "5432:5432"
+    environment:
+      POSTGRES_DB: cryptopipeline
+      POSTGRES_USER: crypto_user
+      POSTGRES_PASSWORD: crypto_password
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
       - ./sql:/docker-entrypoint-initdb.d
-    command: 
-      - "postgres"
-      - "-c"
-      - "max_connections=200" 
-      - "-c"
-      - "shared_buffers=256MB" 
-      - "-c"
-      - "wal_level=logical" 
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB", "-c", "wal_level=logical"]
+    networks:
+      - crypto-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-admin} -d $${POSTGRES_DB:-crypto_db}"]
+      test: ["CMD-SHELL", "pg_isready -U crypto_user -d cryptopipeline"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - crypto-network
 
-  # ========================================================================
-  # APACHE AIRFLOW - Orchestration & Batch Jobs
-  # ========================================================================
+  # Orchestration Layer
   airflow-init:
     image: apache/airflow:2.3.0-python3.9
     container_name: airflow-init
-    hostname: airflow-init
     depends_on:
       postgres:
         condition: service_healthy
@@ -366,7 +260,6 @@ services:
   airflow-webserver:
     image: apache/airflow:2.3.0-python3.9
     container_name: airflow-webserver
-    hostname: airflow-webserver
     depends_on:
       postgres:
         condition: service_healthy
@@ -379,120 +272,95 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://crypto_user:crypto_password@postgres:5432/cryptopipeline
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__WEBSERVER__RBAC: 'true'
-      AIRFLOW_HOME: /opt/airflow
-      _AIRFLOW_WWW_USER_CREATE: 'true'
-      _AIRFLOW_WWW_USER_USERNAME: admin
-      _AIRFLOW_WWW_USER_PASSWORD: admin
     volumes:
       - ./src/dags:/opt/airflow/dags
-      - ./src/spark:/opt/airflow/spark_jobs
+      - ./src:/opt/airflow/src
       - airflow-logs:/opt/airflow/logs
-      - airflow-plugins:/opt/airflow/plugins
     networks:
       - crypto-network
     command: webserver
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   airflow-scheduler:
     image: apache/airflow:2.3.0-python3.9
     container_name: airflow-scheduler
-    hostname: airflow-scheduler
     depends_on:
       postgres:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
     environment:
-      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://crypto_user:crypto_password@postgres:5432/cryptopipeline
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW_HOME: /opt/airflow
     volumes:
       - ./src/dags:/opt/airflow/dags
-      - ./src/spark:/opt/airflow/spark_jobs
+      - ./src:/opt/airflow/src
       - airflow-logs:/opt/airflow/logs
-      - airflow-plugins:/opt/airflow/plugins
     networks:
       - crypto-network
     command: scheduler
 
-  # ========================================================================
-  # PYTHON PRODUCER - Ingestion Layer (Bronze)
-  # ========================================================================
+  # Ingestion Layer (Bronze) - Khôi's Split logic
   producer-mock:
     build:
       context: .
       dockerfile: Dockerfile.producer
     container_name: crypto-producer-mock
-    hostname: crypto-producer-mock
     profiles: ["dev"]
     depends_on:
       - kafka-0
     environment:
       KAFKA_BROKERS: kafka-0:9092,kafka-1:9092,kafka-2:9092
       KAFKA_TOPIC: crypto_ticks
-      PRODUCER_MODE: "mock"
-      INTERVAL_SECONDS: 1
+      CRYPTO_MODE: "dev"
     volumes:
-      - ./src:/app/src
+      - ./src/producer:/app
       - ./logs:/app/logs
     networks:
       - crypto-network
+    command: python /app/producer.py
 
   producer-coinbase:
     build:
       context: .
       dockerfile: Dockerfile.producer
     container_name: crypto-producer-coinbase
-    hostname: crypto-producer-coinbase
     profiles: ["prod"]
     depends_on:
       - kafka-0
     environment:
       KAFKA_BROKERS: kafka-0:9092,kafka-1:9092,kafka-2:9092
       KAFKA_TOPIC: crypto_ticks
-      PRODUCER_MODE: "prod"
-      LOG_LEVEL: INFO
+      CRYPTO_MODE: "prod"
     volumes:
-      - ./src:/app/src
+      - ./src/ingestion:/app
       - ./logs:/app/logs
     networks:
       - crypto-network
+    command: python /app/producer.py
 
-  # ========================================================================
-  # STREAMLIT DASHBOARD - Visualization Layer (Gold)
-  # ========================================================================
-#  streamlit:
-#    build:
-#      context: .
-#      dockerfile: docker/Dockerfile.streamlit
-#    container_name: crypto-dashboard
-#    hostname: crypto-dashboard
-#    ports:
-#      - "8501:8501"
-#    depends_on:
-#      - postgres
-#    environment:
-#      PG_HOST: postgres
-#      PG_PORT: 5432
-#      PG_DB: cryptopipeline
-#      PG_USER: crypto_user
-#      PG_PASSWORD: crypto_password
-#    volumes:
-#      - ./src/dashboard:/app/dashboard
-#      - streamlit-cache:/home/appuser/.streamlit
-#    networks:
-#      - crypto-network
-#    command: streamlit run /app/dashboard/app.py --server.port=8501
+  # Visualization Layer (Gold)
+  streamlit:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.streamlit
+    container_name: crypto-dashboard
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: cryptopipeline
+      DB_USER: crypto_user
+      DB_PASSWORD: crypto_password
+    volumes:
+      - ./src/dashboard:/app/dashboard
+    networks:
+      - crypto-network
+    command: streamlit run /app/dashboard/app.py --server.port=8501
 
-# ============================================================================
-# VOLUMES - Persistent storage for each service
-# ============================================================================
 volumes:
   zookeeper-data:
   zookeeper-logs:
@@ -502,18 +370,12 @@ volumes:
   namenode-data:
   datanode-1-data:
   datanode-2-data:
-  spark-master-data:
-  spark-worker-1-data:
   spark-worker-2-data:
   postgres-data:
   airflow-logs:
   airflow-plugins:
   streamlit-cache:
-  postgres_data:
 
-# ============================================================================
-# NETWORKS - Communication bridge between services
-# ============================================================================
 networks:
   crypto-network:
     driver: bridge

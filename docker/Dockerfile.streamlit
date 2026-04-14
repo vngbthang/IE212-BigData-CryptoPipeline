@@ -1,0 +1,30 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    streamlit==1.28.1 \
+    pandas==1.5.3 \
+    psycopg2-binary==2.9.6 \
+    plotly==5.14.0 \
+    pytz==2023.3
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser && \
+    mkdir -p /home/appuser/.streamlit && \
+    chown -R appuser:appuser /app /home/appuser
+
+USER appuser
+
+EXPOSE 8501
+
+HEALTHCHECK CMD curl -f http://localhost:8501/_stcore/health || exit 1
+
+CMD ["streamlit", "run", "/app/dashboard/app.py", "--server.port=8501", "--logger.level=info"]
