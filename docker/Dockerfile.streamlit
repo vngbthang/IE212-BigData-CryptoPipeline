@@ -14,7 +14,8 @@ RUN pip install --no-cache-dir \
     pandas==1.5.3 \
     psycopg2-binary==2.9.6 \
     plotly==5.14.0 \
-    pytz==2023.3
+    pytz==2023.3 \
+    streamlit-autorefresh
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && \

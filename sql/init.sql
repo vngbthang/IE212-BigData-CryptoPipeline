@@ -51,6 +51,10 @@ CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv (
     process_timestamp TIMESTAMPTZ NOT NULL,  -- When Spark processed this batch
     display_timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- When inserted to DB
     record_count INTEGER NOT NULL DEFAULT 1,  -- How many raw ticks in this 1-min bucket
+    log_returns NUMERIC(20, 8),  -- log(close_t / close_t-1)
+    volatility_30m NUMERIC(20, 8),  -- rolling 30-minute std dev of close price
+    z_score NUMERIC(20, 8),  -- rolling price z-score for anomaly detection
+    is_outlier BOOLEAN DEFAULT FALSE,  -- TRUE when z-score exceeds threshold
     error_flag BOOLEAN DEFAULT FALSE,  -- TRUE if any record malformed
     error_messages TEXT,  -- Comma-separated error codes
     source_partition INTEGER,  -- Kafka partition source
@@ -128,6 +132,22 @@ WHERE error_flag = TRUE;
 -- ⭐ DISPLAY TIMESTAMP INDEX: For recent data queries (dashboard refresh)
 CREATE INDEX IF NOT EXISTS idx_display_timestamp 
 ON gold.gold_crypto_ohlcv (display_timestamp DESC);
+
+-- [NEW] PIPELINE ALERTS TABLE (Data gaps / operational warnings)
+CREATE TABLE IF NOT EXISTS gold.pipeline_alerts (
+    alert_id BIGSERIAL PRIMARY KEY,
+    alert_type VARCHAR(50) NOT NULL,
+    severity VARCHAR(20) NOT NULL,
+    symbol VARCHAR(20),
+    alert_time TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    gap_start TIMESTAMPTZ,
+    gap_end TIMESTAMPTZ,
+    details TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_alerts_alert_time
+ON gold.pipeline_alerts (alert_time DESC);
 
 -- ============================================================================
 -- 4. PREDICTIONS TABLE (Separate table for ML predictions)

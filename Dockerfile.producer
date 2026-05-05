@@ -15,16 +15,7 @@ RUN pip install --no-cache-dir \
 
 COPY src/ /app/src/
 
-ENV PRODUCER_MODE="mock"
-
-CMD if [ "$PRODUCER_MODE" = "prod" ]; then \
-        echo "======================================"; \
-        echo "🚀 Running PRODUCTION (Coinbase) mode..."; \
-        echo "======================================"; \
-        python /app/src/ingestion/coinbase_producer.py; \
-    else \
-        echo "======================================"; \
-        echo "🛠️ Running DEV (Mock) mode..."; \
-        echo "======================================"; \
-        python /app/src/producer/producer.py; \
-    fi
+CMD echo "======================================"; \
+    echo "🚀 Running COINBASE REAL mode..."; \
+    echo "======================================"; \
+    python /app/src/ingestion/coinbase_producer.py

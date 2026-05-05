@@ -3,15 +3,21 @@
 Real-time Crypto Data Pipeline Dashboard
 Reads normalized data from PostgreSQL gold layer
 Displays 3 panels: Realtime, History, System Status
+Features: Auto-refresh every 1 second for live candle updates
 """
 
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
-import numpy as np
+import time
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None
 
 # Page configuration
 st.set_page_config(
@@ -19,6 +25,17 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# ============================================================================
+# AUTO-REFRESH CONFIGURATION (Real-time mode: 1 second)
+# ============================================================================
+
+if st_autorefresh is not None:
+    st_autorefresh(interval=1000, key="crypto_dashboard_autorefresh")
+else:
+    st.warning("streamlit_autorefresh is not installed; falling back to Streamlit reruns.")
+    time.sleep(1)
+    st.rerun()
 
 # ============================================================================
 # DATABASE CONNECTION
@@ -35,7 +52,6 @@ def get_db_connection():
     )
 
 
-@st.cache_data(ttl=10)  # Cache for 10 seconds (realtime feel)
 def fetch_realtime_candles(symbol: str, minutes: int = 30) -> pd.DataFrame:
     """Fetch last N minutes of 1-min OHLCV from gold layer"""
     try:
@@ -47,7 +63,7 @@ def fetch_realtime_candles(symbol: str, minutes: int = 30) -> pd.DataFrame:
             open, high, low, close, 
             volume,
             record_count,
-            EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000 AS latency_ms
+                        EXTRACT(EPOCH FROM (process_timestamp - ingest_timestamp)) AS latency_sec
         FROM gold.gold_crypto_ohlcv
         WHERE symbol = %s 
           AND timestamp >= NOW() - INTERVAL '%s minutes'
@@ -65,159 +81,283 @@ def fetch_realtime_candles(symbol: str, minutes: int = 30) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=10)
-def fetch_aggregated_history(symbol: str, hours: int = 4) -> pd.DataFrame:
-    """Fetch aggregated candles (5-min) for history panel"""
+def fetch_pipeline_health() -> dict:
+    """Fetch core pipeline health metrics."""
     try:
         conn = get_db_connection()
+        # Use the lightweight pipeline_latency_samples for realtime latency
+        # and pipeline_heartbeat for freshness to avoid candle-window skew.
         query = """
-        SELECT 
-            FLOOR(EXTRACT(EPOCH FROM timestamp) / 300) * 300 AS bucket_epoch,
-            TO_TIMESTAMP(FLOOR(EXTRACT(EPOCH FROM timestamp) / 300) * 300) AS bucket,
-            symbol,
-            FIRST_VALUE(open) OVER (PARTITION BY FLOOR(EXTRACT(EPOCH FROM timestamp) / 300) ORDER BY timestamp) AS open,
-            MAX(high) OVER (PARTITION BY FLOOR(EXTRACT(EPOCH FROM timestamp) / 300)) AS high,
-            MIN(low) OVER (PARTITION BY FLOOR(EXTRACT(EPOCH FROM timestamp) / 300)) AS low,
-            LAST_VALUE(close) OVER (PARTITION BY FLOOR(EXTRACT(EPOCH FROM timestamp) / 300) ORDER BY timestamp ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS close,
-            SUM(volume) OVER (PARTITION BY FLOOR(EXTRACT(EPOCH FROM timestamp) / 300)) AS volume
-        FROM gold.gold_crypto_ohlcv
-        WHERE symbol = %s 
-          AND timestamp >= NOW() - INTERVAL '%s hours'
-          AND error_flag = FALSE
-        ORDER BY bucket ASC
-        """
-        df = pd.read_sql(query, conn, params=(symbol, hours))
-        conn.close()
-        
-        # Remove duplicates (keep first of each 5-min bucket)
-        if len(df) > 0:
-            df['bucket'] = pd.to_datetime(df['bucket'])
-            df = df.drop_duplicates(subset=['bucket'], keep='first')
-        
-        return df
-    except Exception as e:
-        st.error(f"❌ Database error (history): {e}")
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=10)
-def fetch_kpi_throughput() -> dict:
-    """Fetch KPI: Records per minute (last 5 min)"""
-    try:
-        conn = get_db_connection()
-        query = """
-        SELECT 
-            DATE_TRUNC('minute', timestamp) AS minute,
-            COUNT(*) as record_count,
-            AVG(EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000) AS avg_latency_ms
-        FROM gold.gold_crypto_ohlcv
-        WHERE timestamp >= NOW() - INTERVAL '5 minutes'
-        GROUP BY DATE_TRUNC('minute', timestamp)
-        ORDER BY minute DESC
-        LIMIT 1
+        WITH last_5m_samples AS (
+            SELECT *
+            FROM gold.pipeline_latency_samples
+            WHERE measured_at >= CURRENT_TIMESTAMP - INTERVAL '5 minutes'
+        ),
+        last_1m_candles AS (
+            SELECT *
+            FROM gold.gold_crypto_ohlcv
+            WHERE process_timestamp >= CURRENT_TIMESTAMP - INTERVAL '1 minute'
+        )
+        SELECT
+            (
+                SELECT AVG(latency_ms) / 1000.0
+                FROM last_5m_samples
+            ) AS avg_latency_sec,
+            (
+                SELECT EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MAX(updated_at)))
+                FROM gold.pipeline_heartbeat
+            ) AS freshness_sec,
+            (
+                SELECT COALESCE(SUM(record_count), 0)
+                FROM last_1m_candles
+                WHERE error_flag = FALSE
+            ) AS records_per_min,
+            (
+                SELECT COUNT(*)
+                FROM last_5m_samples
+            ) AS total_records_5m,
+            (
+                SELECT 0
+            ) AS error_records_5m
         """
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(query)
         result = cursor.fetchone()
         conn.close()
-        
+
+        if not result:
+            return {
+                "avg_latency_sec": 0.0,
+                "freshness_sec": 0.0,
+                "records_per_min": 0,
+                "valid_pct": 0.0,
+                "error_rate": 0.0,
+            }
+
+        total_5m = int(result["total_records_5m"] or 0)
+        error_5m = int(result["error_records_5m"] or 0)
+        valid_pct = 0.0
+        error_rate = 0.0
+        if total_5m > 0:
+            error_rate = (error_5m / total_5m) * 100.0
+            valid_pct = 100.0 - error_rate
+
         return {
-            'records_per_min': result['record_count'] if result else 0,
-            'avg_latency_ms': round(result['avg_latency_ms'], 2) if result else 0
+            "avg_latency_sec": round(float(result["avg_latency_sec"] or 0.0), 3),
+            "freshness_sec": round(float(result["freshness_sec"] or 0.0), 3),
+            "records_per_min": int(result["records_per_min"] or 0),
+            "valid_pct": round(valid_pct, 2),
+            "error_rate": round(error_rate, 2),
         }
     except Exception as e:
-        st.error(f"❌ KPI error (throughput): {e}")
-        return {'records_per_min': 0, 'avg_latency_ms': 0}
+        st.error(f"❌ KPI error (pipeline health): {e}")
+        return {
+            "avg_latency_sec": 0.0,
+            "freshness_sec": 0.0,
+            "records_per_min": 0,
+            "valid_pct": 0.0,
+            "error_rate": 0.0,
+        }
 
 
-@st.cache_data(ttl=10)
-def fetch_kpi_data_quality() -> dict:
-    """Fetch KPI: Data quality metrics"""
+def fetch_latency_percentiles() -> dict:
+    """Fetch latency percentiles based on process time - ingest time."""
     try:
         conn = get_db_connection()
+        # Read percentiles from pipeline_latency_samples which stores latency in ms
         query = """
-        SELECT 
-            COUNT(*) AS total_records,
-            COUNT(CASE WHEN error_flag = FALSE THEN 1 END) AS valid_records,
-            COUNT(CASE WHEN error_flag = TRUE THEN 1 END) AS error_records
-        FROM gold.gold_crypto_ohlcv
-        WHERE timestamp >= NOW() - INTERVAL '1 hour'
+        SELECT
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY latency_ms) AS p50_ms,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95_ms,
+            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms) AS p99_ms,
+            MAX(latency_ms) AS max_ms
+        FROM gold.pipeline_latency_samples
+        WHERE measured_at >= CURRENT_TIMESTAMP - INTERVAL '5 minutes'
         """
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(query)
         result = cursor.fetchone()
         conn.close()
-        
-        if result and result['total_records'] > 0:
-            valid_pct = (result['valid_records'] / result['total_records']) * 100
-            error_rate = (result['error_records'] / result['total_records']) * 100
-        else:
-            valid_pct = 0
-            error_rate = 0
-        
+
+        if not result:
+            return {"p50_sec": 0.0, "p95_sec": 0.0, "p99_sec": 0.0, "max_sec": 0.0}
+
+        # Convert ms -> seconds
+        p50 = float(result["p50_ms"]) / 1000.0 if result["p50_ms"] is not None else 0.0
+        p95 = float(result["p95_ms"]) / 1000.0 if result["p95_ms"] is not None else 0.0
+        p99 = float(result["p99_ms"]) / 1000.0 if result["p99_ms"] is not None else 0.0
+        mx = float(result["max_ms"]) / 1000.0 if result["max_ms"] is not None else 0.0
+
         return {
-            'total': result['total_records'] if result else 0,
-            'valid_pct': round(valid_pct, 1),
-            'error_rate': round(error_rate, 2)
+            "p50_sec": round(p50, 3),
+            "p95_sec": round(p95, 3),
+            "p99_sec": round(p99, 3),
+            "max_sec": round(mx, 3),
         }
     except Exception as e:
-        st.error(f"❌ KPI error (quality): {e}")
-        return {'total': 0, 'valid_pct': 0, 'error_rate': 0}
+        st.error(f"❌ KPI error (latency percentiles): {e}")
+        return {"p50_sec": 0.0, "p95_sec": 0.0, "p99_sec": 0.0, "max_sec": 0.0}
 
 
-@st.cache_data(ttl=10)
-def fetch_kpi_latency_percentiles() -> dict:
-    """Fetch KPI: Latency percentiles"""
+def fetch_api_latency_p99_last_5m() -> dict:
+    """API-ready query for the last 5-minute P99 latency in seconds."""
     try:
         conn = get_db_connection()
         query = """
         SELECT
-            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000) AS p50_ms,
-            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000) AS p95_ms,
-            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000) AS p99_ms,
-            MAX(EXTRACT(EPOCH FROM (display_timestamp - ingest_timestamp)) * 1000) AS max_ms
-        FROM gold.gold_crypto_ohlcv
-        WHERE timestamp >= NOW() - INTERVAL '1 hour'
-          AND error_flag = FALSE
+            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms) / 1000.0 AS p99_latency_sec,
+            COUNT(*) AS sample_count
+        FROM gold.pipeline_latency_samples
+        WHERE measured_at >= CURRENT_TIMESTAMP - INTERVAL '5 minutes'
         """
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(query)
         result = cursor.fetchone()
         conn.close()
-        
+
+        if not result:
+            return {"p99_latency_sec": 0.0, "sample_count": 0}
+
         return {
-            'p50': round(result['p50_ms'], 2) if result and result['p50_ms'] else 0,
-            'p95': round(result['p95_ms'], 2) if result and result['p95_ms'] else 0,
-            'p99': round(result['p99_ms'], 2) if result and result['p99_ms'] else 0,
-            'max': round(result['max_ms'], 2) if result and result['max_ms'] else 0,
+            "p99_latency_sec": round(float(result["p99_latency_sec"] or 0.0), 3),
+            "sample_count": int(result["sample_count"] or 0),
         }
     except Exception as e:
-        st.error(f"❌ KPI error (latency): {e}")
-        return {'p50': 0, 'p95': 0, 'p99': 0, 'max': 0}
+        st.error(f"❌ KPI error (api latency p99): {e}")
+        return {"p99_latency_sec": 0.0, "sample_count": 0}
 
 
-@st.cache_data(ttl=10)
-def fetch_data_freshness() -> dict:
-    """Fetch KPI: Data freshness (seconds since last update)"""
+def fetch_latest_raw_rows(limit: int = 20) -> pd.DataFrame:
+    """Fetch latest rows from gold table for quick schema/data verification."""
     try:
         conn = get_db_connection()
         query = """
-        SELECT 
-            EXTRACT(EPOCH FROM (NOW() - MAX(timestamp))) AS seconds_ago
+        SELECT
+            timestamp,
+            symbol,
+            exchange,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            ingest_timestamp,
+            process_timestamp,
+            record_count,
+            error_flag,
+            error_messages
         FROM gold.gold_crypto_ohlcv
-        WHERE timestamp >= NOW() - INTERVAL '1 hour'
+        ORDER BY process_timestamp DESC
+        LIMIT %s
+        """
+        df = pd.read_sql(query, conn, params=(limit,))
+        conn.close()
+
+        if not df.empty:
+            # Convert UTC timestamps from DB to local timezone (Vietnam: UTC+7)
+            # DB stores timestamps in UTC (e.g. +00:00). Convert to Asia/Ho_Chi_Minh for display.
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Ho_Chi_Minh")
+            df["ingest_timestamp"] = pd.to_datetime(df["ingest_timestamp"], utc=True).dt.tz_convert("Asia/Ho_Chi_Minh")
+            df["process_timestamp"] = pd.to_datetime(df["process_timestamp"], utc=True).dt.tz_convert("Asia/Ho_Chi_Minh")
+        return df
+    except Exception as e:
+        st.error(f"❌ Database error (raw table): {e}")
+        return pd.DataFrame()
+
+
+def fetch_price_change(symbol: str) -> dict:
+    """Fetch current price vs 1h and 24h references."""
+    try:
+        conn = get_db_connection()
+        query = """
+        SELECT
+            (
+                SELECT close
+                FROM gold.gold_crypto_ohlcv
+                WHERE symbol = %(symbol)s AND error_flag = FALSE
+                ORDER BY timestamp DESC
+                LIMIT 1
+            ) AS current_close,
+            (
+                SELECT close
+                FROM gold.gold_crypto_ohlcv
+                WHERE symbol = %(symbol)s
+                  AND error_flag = FALSE
+                  AND timestamp <= CURRENT_TIMESTAMP - INTERVAL '1 hour'
+                ORDER BY timestamp DESC
+                LIMIT 1
+            ) AS close_1h_ago,
+            (
+                SELECT close
+                FROM gold.gold_crypto_ohlcv
+                WHERE symbol = %(symbol)s
+                  AND error_flag = FALSE
+                  AND timestamp <= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+                ORDER BY timestamp DESC
+                LIMIT 1
+            ) AS close_24h_ago
         """
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(query)
+        cursor.execute(query, {"symbol": symbol})
         result = cursor.fetchone()
         conn.close()
-        
+
+        if not result or result["current_close"] is None:
+            return {"current": None, "chg_1h": None, "chg_24h": None}
+
+        current = float(result["current_close"])
+        close_1h = float(result["close_1h_ago"]) if result["close_1h_ago"] is not None else None
+        close_24h = float(result["close_24h_ago"]) if result["close_24h_ago"] is not None else None
+
+        chg_1h = None
+        chg_24h = None
+        if close_1h and close_1h != 0:
+            chg_1h = ((current - close_1h) / close_1h) * 100.0
+        if close_24h and close_24h != 0:
+            chg_24h = ((current - close_24h) / close_24h) * 100.0
+
         return {
-            'freshness_sec': round(result['seconds_ago'], 1) if result and result['seconds_ago'] else 0
+            "current": current,
+            "chg_1h": round(chg_1h, 2) if chg_1h is not None else None,
+            "chg_24h": round(chg_24h, 2) if chg_24h is not None else None,
         }
     except Exception as e:
-        st.error(f"❌ KPI error (freshness): {e}")
-        return {'freshness_sec': 0}
+        st.error(f"❌ KPI error (price change): {e}")
+        return {"current": None, "chg_1h": None, "chg_24h": None}
+
+
+def fetch_volume_distribution(hours: int = 1) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Fetch volume split by symbol and exchange."""
+    try:
+        conn = get_db_connection()
+        symbol_query = """
+        SELECT
+            symbol,
+            SUM(volume)::double precision AS total_volume
+        FROM gold.gold_crypto_ohlcv
+        WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '%s hours'
+          AND error_flag = FALSE
+        GROUP BY symbol
+        ORDER BY total_volume DESC
+        """
+        exchange_query = """
+        SELECT
+            exchange,
+            SUM(volume)::double precision AS total_volume
+        FROM gold.gold_crypto_ohlcv
+        WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '%s hours'
+          AND error_flag = FALSE
+        GROUP BY exchange
+        ORDER BY total_volume DESC
+        """
+        by_symbol = pd.read_sql(symbol_query, conn, params=(hours,))
+        by_exchange = pd.read_sql(exchange_query, conn, params=(hours,))
+        conn.close()
+
+        return by_symbol, by_exchange
+    except Exception as e:
+        st.error(f"❌ KPI error (volume distribution): {e}")
+        return pd.DataFrame(), pd.DataFrame()
 
 
 # ============================================================================
@@ -241,192 +381,202 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown("<div class='title-main'>🚀 Real-time Crypto Data Pipeline</div>", unsafe_allow_html=True)
-st.markdown("<div class='subtitle'>Kafka → Spark → PostgreSQL (Gold Layer)</div>", unsafe_allow_html=True)
+st.markdown("<div class='subtitle'>Coinbase → Kafka → Spark → PostgreSQL (Gold Layer Control Center)</div>", unsafe_allow_html=True)
 
 # Controls
-col1, col2, col3 = st.columns([2, 2, 1])
+col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
 with col1:
     symbol = st.selectbox("📊 Select Symbol", ["BTC-USD", "ETH-USD", "SOL-USD"], key="symbol_selector")
 with col2:
-    refresh_interval = st.selectbox("🔄 Refresh Interval", [5, 10, 30], index=1, key="refresh_interval")
+    candle_window_minutes = st.selectbox("Candle Window (min)", [15, 30, 60], index=1)
 with col3:
-    st.markdown("")  # Spacer
+    distribution_hours = st.selectbox("Volume Horizon (h)", [1, 4, 24], index=0)
+with col4:
     if st.button("🔌 Status"):
-        st.info("✅ Dashboard connected to PostgreSQL")
+        st.info("✅ Dashboard connected to PostgreSQL | ⚡ Auto-refresh: 1 sec")
 
 st.markdown("---")
 
 # ============================================================================
-# PANEL 1: REALTIME (Top)
+# 1) PIPELINE HEALTH METRICS
 # ============================================================================
 
-st.markdown("### 📈 Panel 1: Real-time Data (Last 30 minutes)")
+st.markdown("### 1) Pipeline Health Metrics")
 
-df_realtime = fetch_realtime_candles(symbol, minutes=30)
+health = fetch_pipeline_health()
+latency_pct = fetch_latency_percentiles()
+
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("Avg Latency", f"{health['avg_latency_sec']:.3f} s")
+with col2:
+    st.metric("Data Freshness", f"{health['freshness_sec']:.3f} s ago")
+with col3:
+    st.metric("Records/Min", f"{health['records_per_min']}")
+with col4:
+    st.metric("Valid Records", f"{health['valid_pct']:.2f}%", delta=f"Error {health['error_rate']:.2f}%")
+
+latency_table = pd.DataFrame(
+    {
+        "Latency Metric": ["P50", "P95", "P99", "MAX"],
+        "Seconds": [
+            latency_pct["p50_sec"],
+            latency_pct["p95_sec"],
+            latency_pct["p99_sec"],
+            latency_pct["max_sec"],
+        ],
+    }
+)
+st.dataframe(latency_table, use_container_width=True, hide_index=True)
+
+st.markdown("---")
+
+# ============================================================================
+# 2) DESCRIPTIVE ANALYTICS
+# ============================================================================
+
+st.markdown("### 2) Descriptive Analytics")
+
+df_realtime = fetch_realtime_candles(symbol, minutes=candle_window_minutes)
 
 if not df_realtime.empty:
+    latest_close = float(df_realtime["close"].iloc[-1])
+    high_price = float(df_realtime["high"].max())
+    low_price = float(df_realtime["low"].min())
+    total_volume = float(df_realtime["volume"].sum())
+
     col1, col2, col3, col4 = st.columns(4)
-    
-    # Display current metrics
-    current_close = df_realtime['close'].iloc[-1]
-    current_high = df_realtime['high'].max()
-    current_low = df_realtime['low'].min()
-    current_volume = df_realtime['volume'].sum()
-    
     with col1:
-        st.metric("Current Price", f"${current_close:,.2f}")
+        st.metric("Current Price", f"${latest_close:,.2f}")
     with col2:
-        change = ((current_close - df_realtime['open'].iloc[0]) / df_realtime['open'].iloc[0]) * 100
-        st.metric("24h Change", f"{change:.2f}%", delta=f"{change:.2f}%")
+        st.metric("Window High", f"${high_price:,.2f}")
     with col3:
-        st.metric("High", f"${current_high:,.2f}")
+        st.metric("Window Low", f"${low_price:,.2f}")
     with col4:
-        st.metric("Low", f"${current_low:,.2f}")
-    
-    # Candlestick chart
+        st.metric("Window Volume", f"{total_volume:,.4f}")
+
     fig_ohlcv = go.Figure(data=[
         go.Candlestick(
-            x=df_realtime['timestamp'],
-            open=df_realtime['open'],
-            high=df_realtime['high'],
-            low=df_realtime['low'],
-            close=df_realtime['close'],
+            x=df_realtime["timestamp"],
+            open=df_realtime["open"],
+            high=df_realtime["high"],
+            low=df_realtime["low"],
+            close=df_realtime["close"],
             name=symbol
         )
     ])
     fig_ohlcv.update_layout(
-        title=f"{symbol} - 1-Minute OHLCV (Last 30 min)",
+        title=f"Candlestick (1-minute OHLCV) - {symbol} - Last {candle_window_minutes} min",
         yaxis_title="Price (USD)",
         xaxis_title="Time",
-        height=400,
-        hovermode='x unified',
-        template='plotly_white'
+        height=420,
+        hovermode="x unified",
+        template="plotly_white",
     )
     st.plotly_chart(fig_ohlcv, use_container_width=True)
-    
-    # Volume chart
+
     fig_volume = go.Figure(data=[
         go.Bar(
-            x=df_realtime['timestamp'],
-            y=df_realtime['volume'],
-            name='Volume',
-            marker_color='rgba(31, 119, 180, 0.6)'
+            x=df_realtime["timestamp"],
+            y=df_realtime["volume"],
+            name="Volume",
+            marker_color="rgba(31, 119, 180, 0.65)",
         )
     ])
     fig_volume.update_layout(
-        title="Volume (Last 30 min)",
-        yaxis_title="Volume (BTC/ETH/SOL)",
+        title="Volume Bar Chart",
+        yaxis_title="Volume",
         xaxis_title="Time",
-        height=300,
+        height=280,
         showlegend=False,
-        template='plotly_white'
+        template="plotly_white",
     )
     st.plotly_chart(fig_volume, use_container_width=True)
 else:
-    st.warning("⏳ Waiting for realtime data... Check Kafka & Spark")
+    st.warning("⏳ Waiting for realtime candles... check Kafka/Spark/Postgres pipeline")
 
-st.markdown("---")
-
-# ============================================================================
-# PANEL 2: SHORT-TERM HISTORY (Middle)
-# ============================================================================
-
-st.markdown("### 📊 Panel 2: Short-term History (Last 4 hours, 5-min candles)")
-
-df_history = fetch_aggregated_history(symbol, hours=4)
-
-if not df_history.empty:
-    fig_history = go.Figure(data=[
-        go.Candlestick(
-            x=df_history['bucket'],
-            open=df_history['open'],
-            high=df_history['high'],
-            low=df_history['low'],
-            close=df_history['close'],
-            name=symbol
-        )
-    ])
-    fig_history.update_layout(
-        title=f"{symbol} - 5-Minute OHLCV (Last 4 hours)",
-        yaxis_title="Price (USD)",
-        xaxis_title="Time",
-        height=400,
-        hovermode='x unified',
-        template='plotly_white'
-    )
-    st.plotly_chart(fig_history, use_container_width=True)
+raw_rows = fetch_latest_raw_rows(limit=20)
+st.markdown("#### Latest Raw Rows in Gold (Top 20)")
+if raw_rows.empty:
+    st.info("No rows available in gold table yet.")
 else:
-    st.warning("⏳ Waiting for historical data...")
+    st.dataframe(raw_rows, use_container_width=True, hide_index=True)
+
+# ============================================================================
+# 3) COMPARISON AND MULTI-DIMENSION ANALYSIS
+# ============================================================================
 
 st.markdown("---")
+st.markdown("### 3) Comparison and Multi-Dimension Analysis")
 
-# ============================================================================
-# PANEL 3: SYSTEM STATUS (Bottom)
-# ============================================================================
-
-st.markdown("### 🔧 Panel 3: System Health & KPIs")
-
-kpi_throughput = fetch_kpi_throughput()
-kpi_quality = fetch_kpi_data_quality()
-kpi_latency = fetch_kpi_latency_percentiles()
-kpi_freshness = fetch_data_freshness()
-
-# 3 columns for status
+price_change = fetch_price_change(symbol)
 col1, col2, col3 = st.columns(3)
-
-# Column 1: Throughput
 with col1:
-    st.subheader("📤 Throughput")
-    st.metric("Records/Min", f"{kpi_throughput['records_per_min']}")
-    st.metric("Avg Latency", f"{kpi_throughput['avg_latency_ms']:.1f} ms")
-
-# Column 2: Quality
+    if price_change["current"] is None:
+        st.metric("Current Close", "N/A")
+    else:
+        st.metric("Current Close", f"${price_change['current']:,.2f}")
 with col2:
-    st.subheader("✅ Data Quality")
-    st.metric("Valid Records %", f"{kpi_quality['valid_pct']:.1f}%")
-    st.metric("Error Rate", f"{kpi_quality['error_rate']:.2f}%", delta=f"-{kpi_quality['error_rate']:.2f}%")
-
-# Column 3: Latency & Freshness
+    if price_change["chg_1h"] is None:
+        st.metric("Price Change (1h)", "N/A")
+    else:
+        st.metric("Price Change (1h)", f"{price_change['chg_1h']:.2f}%")
 with col3:
-    st.subheader("⏱️ Latency & Freshness")
-    st.metric("P95 Latency", f"{kpi_latency['p95']:.1f} ms")
-    st.metric("Data Freshness", f"{kpi_freshness['freshness_sec']:.1f} sec")
+    if price_change["chg_24h"] is None:
+        st.metric("Price Change (24h)", "N/A")
+    else:
+        st.metric("Price Change (24h)", f"{price_change['chg_24h']:.2f}%")
 
-# Detailed metrics in expandable sections
-with st.expander("📊 Detailed Metrics"):
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("**Latency Percentiles (last 1 hour)**")
-        latency_data = {
-            'Percentile': ['P50', 'P95', 'P99', 'MAX'],
-            'Latency (ms)': [
-                kpi_latency['p50'],
-                kpi_latency['p95'],
-                kpi_latency['p99'],
-                kpi_latency['max']
+volume_by_symbol, volume_by_exchange = fetch_volume_distribution(hours=distribution_hours)
+
+col1, col2 = st.columns(2)
+with col1:
+    if not volume_by_symbol.empty:
+        fig_symbol = go.Figure(
+            data=[
+                go.Bar(
+                    x=volume_by_symbol["symbol"],
+                    y=volume_by_symbol["total_volume"],
+                    marker_color="rgba(46, 139, 87, 0.75)",
+                )
             ]
-        }
-        st.dataframe(pd.DataFrame(latency_data), use_container_width=True)
-    
-    with col2:
-        st.markdown("**Quality Summary (last 1 hour)**")
-        quality_data = {
-            'Metric': ['Total Records', 'Valid Records', 'Error Records', 'Error Rate %'],
-            'Value': [
-                kpi_quality['total'],
-                int(kpi_quality['total'] * kpi_quality['valid_pct'] / 100),
-                int(kpi_quality['total'] * kpi_quality['error_rate'] / 100),
-                kpi_quality['error_rate']
+        )
+        fig_symbol.update_layout(
+            title=f"Volume Distribution by Symbol (last {distribution_hours}h)",
+            xaxis_title="Symbol",
+            yaxis_title="Total Volume",
+            template="plotly_white",
+            height=320,
+        )
+        st.plotly_chart(fig_symbol, use_container_width=True)
+    else:
+        st.info("No symbol volume data for selected horizon.")
+
+with col2:
+    if not volume_by_exchange.empty:
+        fig_exchange = go.Figure(
+            data=[
+                go.Pie(
+                    labels=volume_by_exchange["exchange"],
+                    values=volume_by_exchange["total_volume"],
+                    hole=0.35,
+                )
             ]
-        }
-        st.dataframe(pd.DataFrame(quality_data), use_container_width=True)
+        )
+        fig_exchange.update_layout(
+            title=f"Volume Share by Exchange (last {distribution_hours}h)",
+            template="plotly_white",
+            height=320,
+        )
+        st.plotly_chart(fig_exchange, use_container_width=True)
+    else:
+        st.info("No exchange volume data for selected horizon.")
 
 st.markdown("---")
 
-# Footer
-st.markdown("""
+# Footer with real-time refresh indicator
+st.markdown(f"""
 <div style="text-align: center; color: #999; font-size: 12px; margin-top: 30px;">
-    Last updated: {} | Auto-refresh: {} seconds
+    Last updated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | Auto-refresh: 1 second | Gold Layer Control Center
 </div>
-""".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), refresh_interval), unsafe_allow_html=True)
+""", unsafe_allow_html=True)
