@@ -27,14 +27,19 @@ KAFKA_BROKERS = os.getenv('KAFKA_BROKERS', 'kafka-0:29092,kafka-1:29093,kafka-2:
 KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'crypto_ticks')
 KAFKA_PARTITION_KEY_PREFIX = 'crypto'
 
+def _load_products() -> list[str]:
+    raw_products = os.getenv('COINBASE_PRODUCTS', 'BTC-USD,ETH-USD')
+    products = [product.strip() for product in raw_products.split(',') if product.strip()]
+    return products or ['BTC-USD', 'ETH-USD']
+
 # Coinbase WebSocket Configuration
 COINBASE_WS_URL = 'wss://ws-feed.exchange.coinbase.com'
-PRODUCTS = ['BTC-USD', 'ETH-USD']  # Products to subscribe
+PRODUCTS = _load_products()  # High-volume products to subscribe
 
 # Retry Configuration
 MAX_RETRIES = 10
 RETRY_BACKOFF_BASE = 1  # seconds
-RETRY_BACKOFF_MAX = 30  # seconds
+RETRY_BACKOFF_MAX = 60  # seconds
 
 # Logging Configuration
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -126,7 +131,7 @@ AVRO_SCHEMA_STR = '''
 # ============================================================================
 # AVRO SCHEMA LOADER
 # ============================================================================
-def load_avro_schema() -> avro.schema.SchemaFromJSONData:
+def load_avro_schema():
     """
     Load and validate Avro schema.
     
@@ -144,7 +149,7 @@ def load_avro_schema() -> avro.schema.SchemaFromJSONData:
 # ============================================================================
 # AVRO SERIALIZATION
 # ============================================================================
-def serialize_to_avro(data: Dict[str, Any], schema: avro.schema.SchemaFromJSONData) -> bytes:
+def serialize_to_avro(data: Dict[str, Any], schema) -> bytes:
     """
     Serialize data to Avro binary format.
     
@@ -207,15 +212,17 @@ def create_kafka_producer() -> Producer:
         'client.id': 'crypto-producer-001',
         
         # Reliability settings
-        'acks': 'all',  # Wait for all in-sync replicas
+        'acks': '1',  # Avoid ISR deadlock when cluster is degraded
         'retries': 10,
         'max.in.flight.requests.per.connection': 5,
         
         # Performance settings (tuned for throughput)
         'compression.type': 'snappy',
-        'batch.size': 32000,  # 32KB batches
-        'linger.ms': 10,  # Wait max 10ms to batch
-        'buffer.memory': 67108864,  # 64MB buffer
+        'queue.buffering.max.ms': 10,  # Wait max 10ms to batch
+        'queue.buffering.max.kbytes': 65536,  # 64MB internal buffer
+        'batch.num.messages': 10000,
+        'linger.ms': 10,
+        'queue.buffering.max.messages': 100000,
         
         # Network settings
         'socket.keepalive.enable': True,
@@ -223,7 +230,7 @@ def create_kafka_producer() -> Producer:
         
         # Timeout settings
         'request.timeout.ms': 30000,
-        'delivery.timeout.ms': 120000,
+        'message.timeout.ms': 120000,
     }
     
     try:
@@ -245,7 +252,7 @@ class CoinbaseWebSocketClient:
     Handles auto-reconnection with exponential backoff.
     """
     
-    def __init__(self, schema: avro.schema.SchemaFromJSONData, producer: Producer):
+    def __init__(self, schema, producer: Producer):
         """
         Initialize WebSocket client.
         
@@ -258,6 +265,7 @@ class CoinbaseWebSocketClient:
         self.ws = None
         self.retry_count = 0
         self.should_run = True
+        self.ws_connected = False
         
         # Statistics
         self.messages_sent = 0
@@ -268,11 +276,13 @@ class CoinbaseWebSocketClient:
         """Callback when WebSocket connection opens."""
         logger.info("✓ WebSocket connection opened")
         self.retry_count = 0  # Reset retry counter on success
+        self.ws_connected = True
         self.send_subscribe_message()
         
     def on_close(self, ws, close_status_code, close_msg) -> None:
         """Callback when WebSocket connection closes."""
         logger.warning(f"✗ WebSocket connection closed: {close_msg}")
+        self.ws_connected = False
         
         if self.should_run:  # Only reconnect if we didn't intentionally close
             self.attempt_reconnect()
@@ -280,11 +290,27 @@ class CoinbaseWebSocketClient:
     def on_error(self, ws, error) -> None:
         """Callback when WebSocket error occurs."""
         logger.error(f"✗ WebSocket error: {error}")
+        self.ws_connected = False
         self.errors_occurred += 1
         
         if self.should_run and self.errors_occurred > MAX_RETRIES:
             logger.critical(f"✗ Max error threshold ({MAX_RETRIES}) reached. Stopping.")
             self.should_run = False
+
+    def _create_websocket_app(self) -> websocket.WebSocketApp:
+        """Create a fresh WebSocketApp instance for each connection attempt."""
+        logger.info("🔗 Creating WebSocket client for Coinbase feed")
+        return websocket.WebSocketApp(
+            COINBASE_WS_URL,
+            on_open=self.on_open,
+            on_message=self.on_message,
+            on_error=self.on_error,
+            on_close=self.on_close,
+        )
+
+    def _compute_backoff_seconds(self) -> int:
+        """Compute exponential backoff delay with a hard upper bound."""
+        return min(RETRY_BACKOFF_BASE * (2 ** self.retry_count), RETRY_BACKOFF_MAX)
             
     def on_message(self, ws, message: str) -> None:
         """
@@ -370,30 +396,33 @@ class CoinbaseWebSocketClient:
             self.should_run = False
             return
             
-        backoff = min(
-            RETRY_BACKOFF_BASE * (2 ** self.retry_count),
-            RETRY_BACKOFF_MAX
-        )
+        backoff = self._compute_backoff_seconds()
         self.retry_count += 1
         self.reconnects += 1
         
-        logger.info(f"⏳ Attempting reconnection #{self.retry_count} in {backoff}s...")
+        logger.info(
+            "⏳ Reconnecting to Coinbase WebSocket in %ss (attempt %s/%s)",
+            backoff,
+            self.retry_count,
+            MAX_RETRIES,
+        )
+
         time.sleep(backoff)
-        self.connect()
+
+        try:
+            self.connect()
+        except Exception as exc:
+            logger.error("✗ Reconnection attempt %s failed: %s", self.retry_count, exc)
+            if self.should_run:
+                self.attempt_reconnect()
         
     def connect(self) -> None:
         """Establish WebSocket connection."""
         try:
-            logger.info(f"🔗 Connecting to: {COINBASE_WS_URL}")
-            self.ws = websocket.WebSocketApp(
-                COINBASE_WS_URL,
-                on_open=self.on_open,
-                on_message=self.on_message,
-                on_error=self.on_error,
-                on_close=self.on_close,
-            )
+            logger.info("🔗 Connecting to Coinbase WebSocket: %s", COINBASE_WS_URL)
+            self.ws = self._create_websocket_app()
         except Exception as e:
-            logger.error(f"✗ Failed to create WebSocket client: {e}")
+            logger.error("✗ Failed to create WebSocket client: %s", e)
             raise
             
     def run(self) -> None:
@@ -403,12 +432,16 @@ class CoinbaseWebSocketClient:
         # Run with reconnect enabled
         while self.should_run:
             try:
+                logger.info("▶ Starting WebSocket event loop")
                 self.ws.run_forever(
                     ping_interval=30,  # Send ping every 30s to keep connection alive
                     ping_timeout=10,
                 )
+                if self.should_run:
+                    logger.warning("⚠️ WebSocket loop exited unexpectedly; scheduling reconnect")
+                    self.attempt_reconnect()
             except Exception as e:
-                logger.error(f"✗ WebSocket run error: {e}")
+                logger.error("✗ WebSocket run error: %s", e)
                 if self.should_run:
                     self.attempt_reconnect()
                     
@@ -438,6 +471,7 @@ def main():
     logger.info(f"  Kafka Brokers: {KAFKA_BROKERS}")
     logger.info(f"  Topic: {KAFKA_TOPIC}")
     logger.info(f"  Products: {PRODUCTS}")
+    logger.info("  Channel: ticker")
     logger.info(f"  WebSocket URL: {COINBASE_WS_URL}")
     logger.info("=" * 80)
     

@@ -52,10 +52,11 @@ services:
     networks:
       - crypto-network
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions.sh", "--bootstrap-server=localhost:9092"]
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
       interval: 10s
-      timeout: 5s
-      retries: 5
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   kafka-1:
     image: confluentinc/cp-kafka:7.3.0
@@ -135,7 +136,7 @@ services:
     ports:
       - "9864:9864"
     environment:
-      SERVICE_PRECONDITION: "namenode:9000"
+      SERVICE_PRECONDITION: "namenode:8020"
       CORE_SITE_XML_hadoop_tmp_dir: /hadoop/tmp
       HDFS_CONF_dfs_datanode_data_dir: file:///hadoop/dfs/data
       HDFS_CONF_dfs_replication: 2
@@ -143,6 +144,12 @@ services:
       - datanode-1-data:/hadoop/dfs/data
     networks:
       - crypto-network
+    healthcheck:
+      test: ["CMD-SHELL", "jps | grep -q DataNode"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
 
   datanode-2:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
@@ -154,7 +161,7 @@ services:
     ports:
       - "9865:9865"
     environment:
-      SERVICE_PRECONDITION: "namenode:9000"
+      SERVICE_PRECONDITION: "namenode:8020"
       CORE_SITE_XML_hadoop_tmp_dir: /hadoop/tmp
       HDFS_CONF_dfs_datanode_data_dir: file:///hadoop/dfs/data
       HDFS_CONF_dfs_replication: 2
@@ -162,6 +169,12 @@ services:
       - datanode-2-data:/hadoop/dfs/data
     networks:
       - crypto-network
+    healthcheck:
+      test: ["CMD-SHELL", "jps | grep -q DataNode"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
 
   # Spark Cluster
   spark-master:
@@ -207,6 +220,7 @@ services:
       dockerfile: docker/Dockerfile.spark
     container_name: spark-worker-2
     hostname: spark-worker-2
+    user: "root"
     depends_on:
       - spark-master
     ports:
@@ -220,6 +234,7 @@ services:
       - ./src:/app/src
     networks:
       - crypto-network
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077", "--webui-port", "8082", "--cores", "2", "--memory", "1g"]
 
   # Storage Layer (Gold)
   postgres:
@@ -253,6 +268,7 @@ services:
         condition: service_healthy
     environment:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://crypto_user:crypto_password@postgres:5432/cryptopipeline
+      AIRFLOW_CONN_POSTGRES_DEFAULT: postgresql://crypto_user:crypto_password@postgres:5432/cryptopipeline
     networks:
       - crypto-network
     entrypoint: bash -c "airflow db init && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com"
@@ -272,6 +288,7 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://crypto_user:crypto_password@postgres:5432/cryptopipeline
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW_CONN_POSTGRES_DEFAULT: postgresql://crypto_user:crypto_password@postgres:5432/cryptopipeline
     volumes:
       - ./src/dags:/opt/airflow/dags
       - ./src:/opt/airflow/src
@@ -291,6 +308,7 @@ services:
     environment:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://crypto_user:crypto_password@postgres:5432/cryptopipeline
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW_CONN_POSTGRES_DEFAULT: postgresql://crypto_user:crypto_password@postgres:5432/cryptopipeline
     volumes:
       - ./src/dags:/opt/airflow/dags
       - ./src:/opt/airflow/src
@@ -313,11 +331,11 @@ services:
       KAFKA_TOPIC: crypto_ticks
       CRYPTO_MODE: "dev"
     volumes:
-      - ./src/producer:/app
+      - ./src/ingestion:/app
       - ./logs:/app/logs
     networks:
       - crypto-network
-    command: python /app/producer.py
+    command: python /app/coinbase_producer.py
 
   producer-coinbase:
     build:
@@ -336,7 +354,7 @@ services:
       - ./logs:/app/logs
     networks:
       - crypto-network
-    command: python /app/producer.py
+    command: python /app/coinbase_producer.py
 
   # Visualization Layer (Gold)
   streamlit:
