@@ -33,7 +33,7 @@ DLQ_TOPIC = "crypto_ticks_dead_letter"
 # HDFS checkpointing is the production target, but the current HDFS cluster
 # is not healthy enough to accept writes. Use a local persistent fallback so
 # the realtime stream stays alive until HDFS is recovered.
-SPARK_CHECKPOINT_BASE = "file:/tmp/spark_checkpoints/crypto_stream"
+SPARK_CHECKPOINT_BASE = "hdfs://namenode:8020/spark/checkpoints/crypto_stream"
 CHECKPOINT_LOCATION = f"{SPARK_CHECKPOINT_BASE}/raw_ticks"
 # HDFS-backed checkpoints prevent local state loss across restarts.
 OHLCV_CHECKPOINT_LOCATION = f"{SPARK_CHECKPOINT_BASE}/ohlcv"

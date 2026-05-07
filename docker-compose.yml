@@ -109,10 +109,11 @@ services:
     hostname: namenode
     ports:
       - "9870:9870"
-      - "9000:9000"
+      - "8020:8020"
     environment:
       CLUSTER_NAME: "crypto-cluster"
-      CORE_SITE_XML_hadoop_tmp_dir: /hadoop/tmp
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:8020"
+      CORE_CONF_hadoop_tmp_dir: /hadoop/tmp
       HDFS_CONF_dfs_namenode_name_dir: file:///hadoop/dfs/name
       HDFS_CONF_dfs_datanode_data_dir: file:///hadoop/dfs/data
       HDFS_CONF_dfs_replication: 2
@@ -137,9 +138,11 @@ services:
       - "9864:9864"
     environment:
       SERVICE_PRECONDITION: "namenode:8020"
-      CORE_SITE_XML_hadoop_tmp_dir: /hadoop/tmp
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:8020"
+      CORE_CONF_hadoop_tmp_dir: /hadoop/tmp
       HDFS_CONF_dfs_datanode_data_dir: file:///hadoop/dfs/data
       HDFS_CONF_dfs_replication: 2
+      CLUSTER_NAME: "crypto-cluster"
     volumes:
       - datanode-1-data:/hadoop/dfs/data
     networks:
@@ -162,9 +165,11 @@ services:
       - "9865:9865"
     environment:
       SERVICE_PRECONDITION: "namenode:8020"
-      CORE_SITE_XML_hadoop_tmp_dir: /hadoop/tmp
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:8020"
+      CORE_CONF_hadoop_tmp_dir: /hadoop/tmp
       HDFS_CONF_dfs_datanode_data_dir: file:///hadoop/dfs/data
       HDFS_CONF_dfs_replication: 2
+      CLUSTER_NAME: "crypto-cluster"
     volumes:
       - datanode-2-data:/hadoop/dfs/data
     networks:
