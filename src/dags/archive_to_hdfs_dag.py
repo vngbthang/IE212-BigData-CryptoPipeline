@@ -29,7 +29,7 @@ DEFAULT_ARGS = {
     "retry_delay": timedelta(minutes=5),
 }
 
-HDFS_ARCHIVE_ROOT = "hdfs://namenode:8020/archive"
+HDFS_ARCHIVE_ROOT = "hdfs://namenode:8020/user/data/archive"
 WEBHDFS_USER = "root"
 
 
@@ -110,7 +110,7 @@ def build_dag() -> DAG:
                 return {"rows": 0, "path": None}
 
             archive_dir_path = (
-                f"/archive/year={interval_start.strftime('%Y')}"
+                f"/user/data/archive/year={interval_start.strftime('%Y')}"
                 f"/month={interval_start.strftime('%m')}"
                 f"/day={interval_start.strftime('%d')}"
                 f"/hour={interval_start.strftime('%H')}"
