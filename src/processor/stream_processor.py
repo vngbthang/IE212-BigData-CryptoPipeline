@@ -30,12 +30,10 @@ APP_NAME = "CryptoPipeline_Silver_Processor"
 KAFKA_BOOTSTRAP_SERVERS = "kafka-0:9092,kafka-1:9092,kafka-2:9092"
 KAFKA_TOPIC = "crypto_ticks"
 DLQ_TOPIC = "crypto_ticks_dead_letter"
-# HDFS checkpointing is the production target, but the current HDFS cluster
-# is not healthy enough to accept writes. Use a local persistent fallback so
-# the realtime stream stays alive until HDFS is recovered.
-SPARK_CHECKPOINT_BASE = "hdfs://namenode:8020/spark/checkpoints/crypto_stream"
+# Use the local filesystem for checkpoints so the realtime stream does not
+# depend on HDFS datanode availability.
+SPARK_CHECKPOINT_BASE = "file:///tmp/spark_checkpoints/crypto_stream"
 CHECKPOINT_LOCATION = f"{SPARK_CHECKPOINT_BASE}/raw_ticks"
-# HDFS-backed checkpoints prevent local state loss across restarts.
 OHLCV_CHECKPOINT_LOCATION = f"{SPARK_CHECKPOINT_BASE}/ohlcv"
 DLQ_CHECKPOINT_LOCATION = f"{SPARK_CHECKPOINT_BASE}/dead_letter"
 # Disable HDFS writes from the realtime stream processor to avoid small-file storm.

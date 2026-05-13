@@ -322,38 +322,18 @@ services:
       - crypto-network
     command: scheduler
 
-  # Ingestion Layer (Bronze) - Khôi's Split logic
-  producer-mock:
-    build:
-      context: .
-      dockerfile: Dockerfile.producer
-    container_name: crypto-producer-mock
-    profiles: ["dev"]
-    depends_on:
-      - kafka-0
-    environment:
-      KAFKA_BROKERS: kafka-0:9092,kafka-1:9092,kafka-2:9092
-      KAFKA_TOPIC: crypto_ticks
-      CRYPTO_MODE: "dev"
-    volumes:
-      - ./src/ingestion:/app
-      - ./logs:/app/logs
-    networks:
-      - crypto-network
-    command: python /app/coinbase_producer.py
-
+  # Ingestion Layer (Bronze) - Production Coinbase Live Data
   producer-coinbase:
     build:
       context: .
       dockerfile: Dockerfile.producer
     container_name: crypto-producer-coinbase
-    profiles: ["prod"]
     depends_on:
       - kafka-0
     environment:
       KAFKA_BROKERS: kafka-0:9092,kafka-1:9092,kafka-2:9092
       KAFKA_TOPIC: crypto_ticks
-      CRYPTO_MODE: "prod"
+      CRYPTO_MODE: "production"
     volumes:
       - ./src/ingestion:/app
       - ./logs:/app/logs
