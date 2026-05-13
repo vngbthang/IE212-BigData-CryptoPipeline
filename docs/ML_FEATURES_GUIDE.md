@@ -1,11 +1,5 @@
 # ML Features Guide: Crypto Pipeline Gold Layer
 
-**Version**: 1.0  
-**Last Updated**: May 5, 2026  
-**Architecture**: Medallion (Bronze → Silver → Gold)  
-**Data Source**: Coinbase WebSocket (Real-time crypto ticks)  
-**Target Symbols**: BTC-USD, ETH-USD
-
 ---
 
 ## Table of Contents
@@ -14,14 +8,15 @@
 2. [Feature Catalog](#feature-catalog)
 3. [Data Integrity & Filtering](#data-integrity--filtering)
 4. [Implementation Guide](#implementation-guide)
-5. [Real-time Inference Workflow](#real-time-inference-workflow)
-6. [Best Practices & Troubleshooting](#best-practices--troubleshooting)
+5. [Streamlit Monitoring & ML Consumption](#streamlit-monitoring--ml-consumption)
+6. [Pipeline Data Inventory](#pipeline-data-inventory)
+7. [Best Practices & Troubleshooting](#best-practices--troubleshooting)
 
 ---
 
 ## Overview
 
-The **Gold Layer** (`gold.gold_crypto_ohlcv`) in our Medallion Architecture serves as the feature store for machine learning models. All data is aggregated into 1-minute OHLCV candles with engineered features computed in real-time via Apache Spark Structured Streaming.
+The **Gold Layer** (`gold.gold_crypto_ohlcv`) in our Medallion Architecture serves as the feature store for machine learning models and operational monitoring. All data is aggregated into 1-minute OHLCV candles with engineered features computed in real-time via Apache Spark Structured Streaming, and the current project exposes the results through a Streamlit dashboard rather than a dedicated FastAPI or Next.js serving layer.
 
 ### Key Characteristics
 
@@ -30,7 +25,7 @@ The **Gold Layer** (`gold.gold_crypto_ohlcv`) in our Medallion Architecture serv
 | **Update Frequency** | Every 1 minute (streaming micro-batches) |
 | **Latency** | < 2 seconds end-to-end (Kafka → Spark → Postgres) |
 | **Data Retention** | 60 days (partition-based retention via Airflow DAG) |
-| **Historical Records** | 277+ candles per symbol (as of May 5, 2026) |
+| **Historical Records** | Continuously growing within the active 60-day retention window |
 | **Granularity** | 1-minute candles (OHLCV aggregation) |
 | **Availability** | 24/7 (real-time streaming pipeline) |
 
@@ -196,6 +191,80 @@ $$\text{is\_outlier} = \begin{cases}
   - 5 - 50: Normal quiet periods
   - 50 - 200: Active trading
   - > 200: High-frequency trading period
+
+### E. Additional Stored Columns in Gold
+
+The table also stores a few project-specific columns that support lineage, dashboarding, and downstream analysis:
+
+| Column | Purpose |
+|--------|---------|
+| `ma_5m` | 5-minute moving average of close price |
+| `ma_20m` | 20-minute moving average of close price |
+| `rsi_14` | 14-period RSI indicator |
+| `volatility` | Legacy rolling volatility field used by older queries |
+| `predicted_direction` | Directional label used by downstream experiments |
+| `confidence_score` | Model or heuristic confidence attached to the candle |
+| `model_version` | Version tag for the producing model or pipeline |
+| `quality_status` | Human-readable quality state for the row |
+| `data_source` | Source system or feed identifier |
+| `created_at` | Row creation timestamp |
+| `updated_at` | Row update timestamp |
+
+---
+
+## Pipeline Data Inventory
+
+This section lists the non-ML and operational data that the pipeline consumes, produces, or tracks. These fields are useful for lineage, debugging, DLQ triage, freshness monitoring, and model governance even when they are not direct training features.
+
+### A. Bronze / Kafka Tick Fields
+
+These are the raw Coinbase tick fields that enter the stream processor before aggregation.
+
+| Field | Where It Appears | Purpose |
+|------|------------------|---------|
+| `timestamp` | Kafka message / Bronze tick | Source event time from Coinbase |
+| `product_id` | Kafka message / Bronze tick | Symbol identifier used as `symbol` downstream |
+| `exchange` | Kafka message / Bronze tick | Source exchange name |
+| `price` | Kafka message / Bronze tick | Raw trade price used for OHLCV aggregation |
+| `size` | Kafka message / Bronze tick | Trade size used for volume aggregation |
+| `bid` | Kafka message / Bronze tick | Best bid at tick time; available for enrichment or spread analysis |
+| `ask` | Kafka message / Bronze tick | Best ask at tick time; available for enrichment or spread analysis |
+| `side` | Kafka message / Bronze tick | Trade direction metadata (`buy` / `sell` / `unknown`) |
+| `sequence` | Kafka message / Bronze tick | Source sequence number for replay/audit |
+| `ingestion_timestamp` | Kafka message / Bronze tick | Event ingestion time from the producer |
+| `partition` / `offset` | Kafka metadata | Partition and offset for lineage and replay |
+| `kafka_timestamp` | Kafka metadata | Broker timestamp for the message |
+
+### B. Validation and DLQ Metadata
+
+These fields are produced by the stream processor when validating or rejecting records.
+
+| Field | Meaning |
+|------|---------|
+| `deserialization_failed` | Avro payload could not be decoded |
+| `error_flag` | Validation failed for the row |
+| `error_messages` | Validation reason code(s) such as `NULL_PRICE` or `INVALID_SIZE` |
+| `dlq_reason` | Normalized reason routed to the dead-letter queue |
+| `dlq_payload` | Serialized payload sent to the DLQ topic |
+
+### C. Operational / Observability Tables
+
+These tables are important for production readiness and freshness checks, but they are not model features themselves.
+
+| Table | Key Columns | Purpose |
+|------|-------------|---------|
+| `gold.pipeline_heartbeat` | `id`, `updated_at` | Single-row liveness marker for the streaming job |
+| `gold.pipeline_latency_samples` | `measured_at`, `latency_ms` | Continuous latency measurements for freshness and SLA checks |
+| `gold.pipeline_alerts` | `alert_type`, `severity`, `symbol`, `gap_start`, `gap_end`, `details` | Operational warnings such as missing minute windows or data gaps |
+
+### D. Downstream ML-Ready Data Summary
+
+For model training and inference, the primary usable dataset is still `gold.gold_crypto_ohlcv` plus the operational tables above. In practice:
+
+- Use `gold.gold_crypto_ohlcv` for training features and inference features.
+- Use `gold.pipeline_heartbeat` and `gold.pipeline_latency_samples` to verify freshness before trusting the dataset.
+- Use `gold.pipeline_alerts` and `error_flag` / `error_messages` to exclude bad windows or investigate gaps.
+- Use Kafka metadata and DLQ fields to debug upstream ingestion issues when features look stale or incomplete.
 
 ---
 
@@ -656,7 +725,7 @@ prediction = predict_next_volatility('BTC-USD', model, scaler, features)
 
 ---
 
-## Real-time Inference Workflow
+## Streamlit Monitoring & ML Consumption
 
 ### Architecture Diagram
 
@@ -700,20 +769,14 @@ prediction = predict_next_volatility('BTC-USD', model, scaler, features)
              │
              ▼ (Query latest candle + features)
     ┌──────────────────────────────────────────────┐
-    │  FastAPI Model Serving (Python)              │
-    │  Endpoints:                                  │
-    │  POST /predict/volatility?symbol=BTC-USD    │
-    │  POST /predict/price?symbol=BTC-USD         │
-    │  GET  /features?symbol=BTC-USD&limit=100    │
+    │  Streamlit Dashboard (Python UI)             │
+    │  Realtime, History, System Status panels     │
     └────────┬─────────────────────────────────────┘
              │
-             ▼ (JSON predictions)
+         ▼
     ┌──────────────────────────────────────────────┐
-    │  Next.js Frontend (React Dashboard)          │
-    │  ├─ Real-time charts (1s auto-refresh)      │
-    │  ├─ Predictions panel                        │
-    │  ├─ Feature heatmap                          │
-    │  └─ Alerts & notifications                   │
+    │  Analyst / ML Consumer                       │
+    │  Queries latest candles and trains models    │
     └──────────────────────────────────────────────┘
 ```
 
@@ -732,60 +795,41 @@ prediction = predict_next_volatility('BTC-USD', model, scaler, features)
 - Maintain 60-day retention (partition-based)
 - Provide JDBC endpoint for Spark history queries
 
-#### **Stage 3: Model Serving (FastAPI)**
+#### **Stage 3: Streamlit Monitoring Dashboard**
+
+The current repository exposes the Gold layer through a Streamlit dashboard in [src/dashboard/app.py](../src/dashboard/app.py). The dashboard auto-refreshes every second, reads from PostgreSQL, and shows realtime candles, latency metrics, and system status for operators and ML users.
+
 ```python
-from fastapi import FastAPI, HTTPException
-import joblib
+import streamlit as st
+import pandas as pd
+import psycopg2
 
-app = FastAPI()
-model = joblib.load('volatility_model.pkl')
+conn = psycopg2.connect(
+    host="postgres",
+    port=5432,
+    database="cryptopipeline",
+    user="crypto_user",
+    password="crypto_password",
+)
 
-@app.post("/predict/volatility")
-async def predict_volatility(symbol: str = 'BTC-USD'):
-    """Predict next-minute volatility based on latest candle."""
-    try:
-        latest = fetch_latest_candle(symbol)  # From Postgres
-        features = preprocess_features(latest)
-        prediction = model.predict([features])[0]
-        
-        return {
-            'symbol': symbol,
-            'predicted_volatility': float(prediction),
-            'timestamp': datetime.now().isoformat(),
-            'confidence': 0.87  # From cross-validation R²
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+latest = pd.read_sql(
+    """
+    SELECT timestamp, symbol, close, log_returns, volatility_30m, z_score, is_outlier
+    FROM gold.gold_crypto_ohlcv
+    WHERE symbol = 'BTC-USD' AND error_flag = FALSE
+    ORDER BY timestamp DESC
+    LIMIT 20
+    """,
+    conn,
+)
+
+st.line_chart(latest.set_index("timestamp")["close"])
+st.dataframe(latest)
 ```
 
-#### **Stage 4: Frontend Visualization (Next.js)**
-```javascript
-// React component
-import { useEffect, useState } from 'react';
+#### **Stage 4: ML Training and Consumption**
 
-export default function PredictionPanel() {
-  const [prediction, setPrediction] = useState(null);
-  
-  useEffect(() => {
-    const fetchPrediction = async () => {
-      const res = await fetch('/api/predict/volatility?symbol=BTC-USD');
-      setPrediction(await res.json());
-    };
-    
-    // Refresh every 5 seconds
-    const interval = setInterval(fetchPrediction, 5000);
-    return () => clearInterval(interval);
-  }, []);
-  
-  return (
-    <div>
-      <h2>Next-Minute Volatility Prediction</h2>
-      <p>Predicted: {prediction?.predicted_volatility?.toFixed(6)}</p>
-      <p>Confidence: {prediction?.confidence?.toFixed(2)}%</p>
-    </div>
-  );
-}
-```
+For machine learning, consume the Gold table directly from Python notebooks or batch jobs. The recommended flow is to query clean rows from `gold.gold_crypto_ohlcv`, apply filters such as `error_flag = FALSE`, `is_outlier = FALSE`, and `record_count >= 5`, then train or score models offline.
 
 ### Latency SLA
 
@@ -797,9 +841,8 @@ export default function PredictionPanel() {
 | Spark → Postgres Write | 100-300ms | < 500ms | ✅ |
 | **Total (Tick to DB)** | **550-1100ms** | **< 2s** | ✅ |
 | Postgres Query | 50-100ms | < 200ms | ✅ |
-| FastAPI Inference | 10-50ms | < 100ms | ✅ |
-| Frontend Render | 100-500ms | < 1s | ✅ |
-| **Total (Tick to UI)** | **710-1750ms** | **< 3s** | ✅ |
+| Streamlit Refresh + Render | 100-500ms | < 1s | ✅ |
+| **Total (Tick to UI)** | **710-1700ms** | **< 3s** | ✅ |
 
 ---
 

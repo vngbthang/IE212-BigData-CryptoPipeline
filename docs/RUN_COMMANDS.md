@@ -1,8 +1,5 @@
 # Production Run Commands — Crypto Pipeline
 
-**Environment**: Production (Real-time Coinbase data ingestion)  
-**Last Updated**: May 13, 2026
-
 ---
 
 ## Production Startup Sequence
@@ -96,10 +93,10 @@ docker compose exec namenode hdfs dfs -ls -R /user/data/archive/
 
 ```bash
 # Trigger retention DAG (removes data older than 60 days)
-docker compose exec airflow-webserver airflow dags trigger gold_data_retention_daily
+docker compose exec airflow-webserver airflow dags trigger retention_dag
 
 # Check retention DAG status
-docker compose exec airflow-webserver airflow dags list-runs -d gold_data_retention_daily | head -5
+docker compose exec airflow-webserver airflow dags list-runs -d retention_dag | head -5
 ```
 
 ---
@@ -126,10 +123,20 @@ docker logs --follow crypto-dashboard
 ### 9. Full System Diagnostics
 
 ```bash
-# Run comprehensive validation script (queries all system metrics)
-docker compose exec postgres psql -U crypto_user -d cryptopipeline -f DIAGNOSTIC_VALIDATION.sql
+# Run read-only validation queries directly against the live tables
+docker compose exec postgres psql -U crypto_user -d cryptopipeline -c \
+  "SELECT COUNT(*) as gold_rows, MAX(process_timestamp) as latest_ts FROM gold.gold_crypto_ohlcv;"
 
-# Sample output: row counts, feature availability, latency percentiles, schema sync
+docker compose exec postgres psql -U crypto_user -d cryptopipeline -c \
+  "SELECT ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY latency_ms)::NUMERIC, 2) as p50_ms,\
+          ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms)::NUMERIC, 2) as p95_ms,\
+          ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms)::NUMERIC, 2) as p99_ms,\
+          ROUND(MAX(latency_ms)::NUMERIC, 2) as max_ms\
+   FROM gold.pipeline_latency_samples\
+   WHERE measured_at >= CURRENT_TIMESTAMP - INTERVAL '5 minutes';"
+
+docker compose exec postgres psql -U crypto_user -d cryptopipeline -c \
+  "SELECT COUNT(*) as error_count FROM gold.gold_crypto_ohlcv WHERE error_flag = TRUE;"
 ```
 
 ### 10. Check Latency Percentiles (Last 5 minutes)
