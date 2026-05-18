@@ -67,27 +67,104 @@ CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv (
 PARTITION BY RANGE (CAST(timestamp AS DATE));
 
 -- ============================================================================
--- 3.1 CREATE WEEKLY PARTITIONS (Example: 4 weeks)
+-- 3.1 CREATE WEEKLY PARTITIONS (May 2026 onwards - dynamic via lightweight_consumer.py)
+-- Partitions for April 2026
 -- ============================================================================
 -- Week 1
-CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_04_01 
+CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_04_01
 PARTITION OF gold.gold_crypto_ohlcv
 FOR VALUES FROM ('2026-04-01') TO ('2026-04-08');
 
 -- Week 2
-CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_04_08 
+CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_04_08
 PARTITION OF gold.gold_crypto_ohlcv
 FOR VALUES FROM ('2026-04-08') TO ('2026-04-15');
 
 -- Week 3
-CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_04_15 
+CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_04_15
 PARTITION OF gold.gold_crypto_ohlcv
 FOR VALUES FROM ('2026-04-15') TO ('2026-04-22');
 
 -- Week 4
-CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_04_22 
+CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_04_22
 PARTITION OF gold.gold_crypto_ohlcv
 FOR VALUES FROM ('2026-04-22') TO ('2026-04-29');
+
+-- ============================================================================
+-- 3.2 MAY 2026 PARTITIONS (dynamic creation)
+-- lightweight_consumer.py calls _ensure_future_partitions() on startup
+-- These partitions cover the current date range so the table is usable
+-- immediately on first run without waiting for the consumer to create them.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_04_29
+PARTITION OF gold.gold_crypto_ohlcv
+FOR VALUES FROM ('2026-04-29') TO ('2026-05-06');
+
+CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_05_06
+PARTITION OF gold.gold_crypto_ohlcv
+FOR VALUES FROM ('2026-05-06') TO ('2026-05-13');
+
+CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_05_13
+PARTITION OF gold.gold_crypto_ohlcv
+FOR VALUES FROM ('2026-05-13') TO ('2026-05-20');
+
+CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_05_20
+PARTITION OF gold.gold_crypto_ohlcv
+FOR VALUES FROM ('2026-05-20') TO ('2026-05-27');
+
+CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_05_27
+PARTITION OF gold.gold_crypto_ohlcv
+FOR VALUES FROM ('2026-05-27') TO ('2026-06-03');
+
+-- June 2026
+CREATE TABLE IF NOT EXISTS gold.gold_crypto_ohlcv_2026_06_03
+PARTITION OF gold.gold_crypto_ohlcv
+FOR VALUES FROM ('2026-06-03') TO ('2026-06-10');
+
+-- ============================================================================
+-- 3.3 FUNCTION: Auto-create future partitions (called by Airflow retention DAG)
+-- Ensures partitions always exist for today + N days ahead
+-- ============================================================================
+CREATE OR REPLACE FUNCTION gold.ensure_future_partitions(days_ahead INT DEFAULT 7)
+RETURNS INT AS $$
+DECLARE
+    target_date DATE;
+    partition_name TEXT;
+    week_start DATE;
+    week_end DATE;
+    created INT := 0;
+    i INT;
+BEGIN
+    FOR i IN 0..days_ahead LOOP
+        target_date := CURRENT_DATE + i;
+        -- Week starts on Monday (ISO week)
+        week_start := target_date - EXTRACT(DOW FROM target_date)::INT + 1;
+        IF EXTRACT(DOW FROM target_date) = 0 THEN
+            week_start := target_date - 6;  -- Sunday → previous Monday
+        END IF;
+        week_end := week_start + 7;
+        partition_name := 'gold_crypto_ohlcv_' || TO_CHAR(week_start, 'YYYYMMDD');
+
+        -- Check if partition already exists
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_class c
+            JOIN pg_inherits i2 ON c.oid = i2.inhrelid
+            JOIN pg_class parent ON parent.oid = i2.inhparent
+            WHERE parent.relname = 'gold_crypto_ohlcv'
+              AND c.relname = partition_name
+        ) THEN
+            EXECUTE format(
+                'CREATE TABLE IF NOT EXISTS gold.%I '
+                'PARTITION OF gold.gold_crypto_ohlcv '
+                'FOR VALUES FROM (%L) TO (%L)',
+                partition_name, week_start, week_end
+            );
+            created := created + 1;
+        END IF;
+    END LOOP;
+    RETURN created;
+END;
+$$ LANGUAGE plpgsql;
 
 -- ============================================================================
 -- 3.2 CREATE COMPOSITE INDEXES (Critical for query performance)

@@ -1,9 +1,34 @@
 # ============================================================================
 # REAL-TIME CRYPTO DATA PIPELINE - DOCKER COMPOSE (FINAL MERGE)
 # Medallion Architecture: Bronze (Kafka) → Silver (Spark) → Gold (Postgres)
+#
+# RESILIENCE FEATURES:
+# 1. Kafka init container auto-creates topics with 7-day retention
+# 2. Lightweight consumer is the ACTIVE processor (Spark workers disabled by default)
+# 3. Dynamic PostgreSQL partitions (current + 7 days ahead)
+# 4. Producer auto-creates topic if missing (via producer-side retry)
 # ============================================================================
 
 services:
+
+  # Kafka Topic Initializer (runs once before Kafka brokers)
+  # Ensures topics exist with proper retention settings even after multi-day downtime
+  kafka-init:
+    image: confluentinc/cp-kafka:7.3.0
+    container_name: kafka-init
+    depends_on:
+      kafka-0:
+        condition: service_started
+    environment:
+      KAFKA_INIT_BROKER: kafka-0:9092
+      KAFKA_INIT_TOPIC: crypto_ticks
+      KAFKA_INIT_DLQ_TOPIC: crypto_ticks_dead_letter
+      KAFKA_INIT_RETENTION_HOURS: "168"
+    volumes:
+      - ./docker/init_kafka_topics.sh:/init.sh:ro
+    entrypoint: ["/bin/bash", "/init.sh"]
+    networks:
+      - crypto-network
 
   # Coordination Service
   zookeeper:
@@ -181,8 +206,13 @@ services:
       retries: 10
       start_period: 60s
 
-  # Spark Cluster
+  # Spark Cluster - OPTIONAL (disabled by default, use profile 'spark' to enable)
+  # Use this instead of lightweight-processor when you need Spark's full feature set
+  # IMPORTANT: Do NOT run both Spark and Lightweight at the same time (dual-writer conflict!)
+  # To enable: docker-compose --profile spark up -d
   spark-master:
+    profiles:
+      - spark
     build:
       context: .
       dockerfile: docker/Dockerfile.spark
@@ -203,6 +233,8 @@ services:
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master", "--port", "7077", "--webui-port", "8080"]
 
   spark-worker-1:
+    profiles:
+      - spark
     build:
       context: .
       dockerfile: docker/Dockerfile.spark
@@ -220,6 +252,8 @@ services:
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077", "--webui-port", "8081", "--cores", "2", "--memory", "1g"]
 
   spark-worker-2:
+    profiles:
+      - spark
     build:
       context: .
       dockerfile: docker/Dockerfile.spark
@@ -329,7 +363,8 @@ services:
       dockerfile: Dockerfile.producer
     container_name: crypto-producer-coinbase
     depends_on:
-      - kafka-0
+      kafka-init:
+        condition: service_completed_successfully
     environment:
       KAFKA_BROKERS: kafka-0:9092,kafka-1:9092,kafka-2:9092
       KAFKA_TOPIC: crypto_ticks
@@ -340,6 +375,37 @@ services:
     networks:
       - crypto-network
     command: python /app/coinbase_producer.py
+
+  # Lightweight Real-time Processor - Python-only (No Spark!)
+  # Reads Kafka → PostgreSQL (silver.raw_ticks) with auto OHLCV aggregation via trigger
+  # Target: <30s latency on laptop hardware
+  lightweight-processor:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.lightweight
+    container_name: lightweight-processor
+    hostname: lightweight-processor
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka-0:9092,kafka-1:9092,kafka-2:9092
+      KAFKA_TOPIC: crypto_ticks
+      KAFKA_GROUP_ID: lightweight-consumer-v1
+      BATCH_SIZE: "500"
+      BATCH_FLUSH_INTERVAL_SEC: "1.0"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: cryptopipeline
+      DB_USER: crypto_user
+      DB_PASSWORD: crypto_password
+      LOG_LEVEL: INFO
+      PYTHONUNBUFFERED: "1"
+    networks:
+      - crypto-network
+    restart: unless-stopped
 
   # Visualization Layer (Gold)
   streamlit:

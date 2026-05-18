@@ -177,6 +177,42 @@ def serialize_to_avro(data: Dict[str, Any], schema) -> bytes:
 # ============================================================================
 # KAFKA PRODUCER CALLBACK
 # ============================================================================
+def ensure_kafka_topic(producer: Producer) -> bool:
+    """Ensure Kafka topic exists. Creates it if missing (fallback for kafka-init race)."""
+    try:
+        admin = AdminClient({'bootstrap.servers': KAFKA_BROKERS})
+        metadata = admin.list_topics(timeout=10)
+        if KAFKA_TOPIC in metadata.topics:
+            logger.info(f"[TOPIC] Topic '{KAFKA_TOPIC}' already exists.")
+            return True
+
+        logger.info(f"[TOPIC] Topic '{KAFKA_TOPIC}' not found. Creating...")
+        new_topic = NewTopic(
+            KAFKA_TOPIC,
+            num_partitions=6,
+            replication_factor=3,
+            config={
+                'retention.ms': str(7 * 24 * 3600 * 1000),  # 7 days
+                'min.insync.replicas': '2',
+                'cleanup.policy': 'delete',
+            }
+        )
+        fs = admin.create_topics([new_topic])
+        for topic, f in fs.items():
+            try:
+                f.result()
+                logger.info(f"[TOPIC] Created topic '{topic}'")
+            except Exception as e:
+                if 'already exists' in str(e).lower():
+                    logger.info(f"[TOPIC] Topic '{topic}' already exists (race)")
+                else:
+                    raise
+        return True
+    except Exception as e:
+        logger.warning(f"[TOPIC] Could not verify/create topic: {e}")
+        return True  # Proceed anyway, producer will fail if topic truly missing
+
+
 def kafka_delivery_report(err: Optional[KafkaError], msg) -> None:
     """
     Callback for Kafka message delivery confirmation.
@@ -217,12 +253,13 @@ def create_kafka_producer() -> Producer:
         'max.in.flight.requests.per.connection': 5,
         
         # Performance settings (tuned for throughput)
-        'compression.type': 'snappy',
-        'queue.buffering.max.ms': 10,  # Wait max 10ms to batch
-        'queue.buffering.max.kbytes': 65536,  # 64MB internal buffer
-        'batch.num.messages': 10000,
+        # Smaller queue = less memory bloat, blocking produce prevents message loss
+        'compression.type': 'gzip',
+        'queue.buffering.max.ms': 10,
+        'queue.buffering.max.kbytes': 5120,  # 5MB buffer
+        'batch.num.messages': 100,
         'linger.ms': 10,
-        'queue.buffering.max.messages': 100000,
+        'queue.buffering.max.messages': 5000,  # Cap at 5K messages
         
         # Network settings
         'socket.keepalive.enable': True,
@@ -346,15 +383,28 @@ class CoinbaseWebSocketClient:
             
             # Serialize to Avro
             avro_bytes = serialize_to_avro(tick_record, self.schema)
-            
-            # Produce to Kafka (async, with callback)
+
+            # Produce to Kafka with backpressure handling
+            # poll(0) serves pending delivery callbacks to free queue space
+            # If BufferError raised, poll and retry once
             partition_key = f"{KAFKA_PARTITION_KEY_PREFIX}:{tick_record['product_id']}".encode()
-            self.producer.produce(
-                topic=KAFKA_TOPIC,
-                key=partition_key,
-                value=avro_bytes,
-                on_delivery=kafka_delivery_report,
-            )
+            self.producer.poll(0)
+            try:
+                self.producer.produce(
+                    topic=KAFKA_TOPIC,
+                    key=partition_key,
+                    value=avro_bytes,
+                    on_delivery=kafka_delivery_report,
+                )
+            except BufferError:
+                # Queue full - poll to drain completed deliveries, then retry
+                self.producer.poll(1)
+                self.producer.produce(
+                    topic=KAFKA_TOPIC,
+                    key=partition_key,
+                    value=avro_bytes,
+                    on_delivery=kafka_delivery_report,
+                )
             
             self.messages_sent += 1
             
@@ -481,7 +531,10 @@ def main():
         
         # Create Kafka producer
         producer = create_kafka_producer()
-        
+
+        # Ensure topic exists (fallback if kafka-init hasn't run yet)
+        ensure_kafka_topic(producer)
+
         # Create and run WebSocket client
         ws_client = CoinbaseWebSocketClient(schema, producer)
         

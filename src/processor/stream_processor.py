@@ -36,6 +36,8 @@ SPARK_CHECKPOINT_BASE = "file:///tmp/spark_checkpoints/crypto_stream"
 CHECKPOINT_LOCATION = f"{SPARK_CHECKPOINT_BASE}/raw_ticks"
 OHLCV_CHECKPOINT_LOCATION = f"{SPARK_CHECKPOINT_BASE}/ohlcv"
 DLQ_CHECKPOINT_LOCATION = f"{SPARK_CHECKPOINT_BASE}/dead_letter"
+# Default to "earliest" but can be overridden to "latest" by start_spark.sh after detecting stale checkpoint
+STARTING_OFFSETS = os.getenv("SPARK_STARTING_OFFSETS", "earliest")
 # Disable HDFS writes from the realtime stream processor to avoid small-file storm.
 # HDFS ingestion is handled by a separate batch job. Keep this unset to prevent accidental writes.
 HDFS_GOLD_OHLCV_PATH = None
@@ -56,7 +58,7 @@ WRITE_TO_DB = True
 WRITE_TO_CONSOLE = os.getenv("WRITE_TO_CONSOLE", "false").lower() == "true"
 # Debug flag: enable writing raw validated ticks to console for troubleshooting
 DEBUG_RAW = os.getenv("DEBUG_RAW", "false").lower() == "true"
-WATERMARK_DELAY = os.getenv("WATERMARK_DELAY", "1 second")
+WATERMARK_DELAY = os.getenv("WATERMARK_DELAY", "2 minutes")
 FORCE_WRITE_RAW = os.getenv("FORCE_WRITE_RAW", "false").lower() == "true"
 
 
@@ -125,6 +127,33 @@ def ensure_heartbeat_table() -> None:
         cursor.execute("ALTER TABLE gold.gold_crypto_ohlcv ADD COLUMN IF NOT EXISTS volatility_30m DOUBLE PRECISION")
         cursor.execute("ALTER TABLE gold.gold_crypto_ohlcv ADD COLUMN IF NOT EXISTS z_score DOUBLE PRECISION")
         cursor.execute("ALTER TABLE gold.gold_crypto_ohlcv ADD COLUMN IF NOT EXISTS is_outlier BOOLEAN DEFAULT FALSE")
+
+        # --- SILVER LAYER: Raw ticks table (true realtime, ~5s latency) ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS silver.raw_ticks (
+                id BIGSERIAL PRIMARY KEY,
+                symbol VARCHAR(20) NOT NULL,
+                exchange VARCHAR(20),
+                price NUMERIC(20, 8) NOT NULL,
+                size NUMERIC(20, 8),
+                bid NUMERIC(20, 8),
+                ask NUMERIC(20, 8),
+                side VARCHAR(10),
+                tick_timestamp TIMESTAMPTZ NOT NULL,
+                ingest_timestamp TIMESTAMPTZ NOT NULL,
+                process_timestamp TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                source_partition INTEGER,
+                source_offset BIGINT
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_raw_ticks_symbol_time
+            ON silver.raw_ticks (symbol, tick_timestamp DESC)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_raw_ticks_time
+            ON silver.raw_ticks (tick_timestamp DESC)
+        """)
     finally:
         cursor.close()
         conn.close()
@@ -190,6 +219,7 @@ def create_spark_session() -> SparkSession:
         .config(
             "spark.jars.packages",
             "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,"
+            "org.apache.spark:spark-streaming-kafka-0-10_2.12:3.5.1,"
             "org.postgresql:postgresql:42.7.3,"
             "org.apache.spark:spark-avro_2.12:3.5.1",
         )
@@ -226,8 +256,10 @@ def read_kafka_stream(spark: SparkSession) -> DataFrame:
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
         .option("subscribe", KAFKA_TOPIC)
-        .option("startingOffsets", "earliest")
-        .option("failOnDataLoss", "false")
+        .option("startingOffsets", STARTING_OFFSETS)  # "earliest" or "latest" (set by start_spark.sh)
+        .option("failOnDataLoss", "false")  # Continue even if some Kafka data is lost (e.g., after multi-day shutdown)
+        .option("kafka.session.timeout.ms", "30000")
+        .option("kafka.heartbeat.interval.ms", "10000")
         .load()
     )
 
@@ -297,8 +329,8 @@ def enrich_ohlcv_features(batch_df: DataFrame) -> DataFrame:
     enriched = (
         batch_df
         .withColumn("prev_close", lag(close_double).over(symbol_window))
-        .withColumn("rolling_mean_close", spark_avg(close_double).over(rolling_window))
-        .withColumn("volatility_30m", stddev_samp(close_double).over(rolling_window))
+        .withColumn("rolling_mean_close", spark_avg(close_double).over(rolling_window).cast("double"))
+        .withColumn("volatility_30m", stddev_samp(close_double).over(rolling_window).cast("double"))
         .withColumn(
             "log_returns",
             when(
@@ -523,6 +555,108 @@ def log_stream_progress(stream_query, logger: logging.Logger) -> None:
     thread.start()
 
 
+def _is_partition_covered(cursor, target_date: datetime) -> bool:
+    """Check if a date is covered by any existing partition in gold_crypto_ohlcv."""
+    date_str_nounderscore = target_date.strftime('%Y%m%d')
+    date_str_underscore = target_date.strftime('%Y_%m_%d')
+    date_pattern = target_date.strftime('%Y-%m-%d')
+    
+    cursor.execute("""
+        SELECT COUNT(*)
+        FROM pg_class c
+        JOIN pg_inherits i ON c.oid = i.inhrelid
+        JOIN pg_class parent ON parent.oid = i.inhparent
+        WHERE parent.relname = 'gold_crypto_ohlcv'
+          AND parent.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'gold')
+          AND (
+              c.relname LIKE %s
+              OR c.relname LIKE %s
+          )
+    """, (f'%{date_str_nounderscore}', f'%{date_str_underscore}'))
+    
+    return cursor.fetchone()[0] > 0
+
+
+def _ensure_partitions_for_batch(cursor, min_timestamp, max_timestamp) -> None:
+    """
+    Ensure partitions exist for the date range covered by the current batch.
+    Uses pg_class to check existing partitions and creates missing ones.
+    """
+    logger = logging.getLogger(__name__)
+    
+    if not min_timestamp or not max_timestamp:
+        return
+    
+    start_date = min_timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_date = max_timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    current_date = start_date
+    while current_date <= end_date:
+        if not _is_partition_covered(cursor, current_date):
+            partition_name = f"gold_crypto_ohlcv_{current_date.strftime('%Y%m%d')}"
+            week_start = current_date - timedelta(days=current_date.weekday())
+            week_end = week_start + timedelta(days=7)
+            
+            try:
+                cursor.execute(f"""
+                    CREATE TABLE IF NOT EXISTS gold.{partition_name}
+                    PARTITION OF gold.gold_crypto_ohlcv
+                    FOR VALUES FROM ('{week_start.strftime('%Y-%m-%d')}')
+                                 TO ('{week_end.strftime('%Y-%m-%d')}')
+                """)
+                logger.info(f"[PARTITION_CREATED] {partition_name} ({week_start.date()} to {week_end.date()})")
+            except psycopg2.errors.DuplicateTable:
+                logger.debug(f"[PARTITION_EXISTS] {partition_name}")
+            except Exception as part_err:
+                if 'overlaps with' in str(part_err) or 'already exists' in str(part_err).lower():
+                    logger.debug(f"[PARTITION_SKIP] {partition_name}: already covered by sibling partition")
+                else:
+                    logger.warning(f"[PARTITION_ERROR] {partition_name}: {part_err}")
+        
+        current_date += timedelta(days=1)
+
+
+def _ensure_future_partitions() -> None:
+    """Ensure partitions exist for today + 7 days ahead on startup."""
+    logger = logging.getLogger(__name__)
+    conn = psycopg2.connect(
+        host=DB_HOST, port=int(DB_PORT), database=DB_NAME,
+        user=DB_USER, password=DB_PASSWORD,
+    )
+    conn.autocommit = True
+    cursor = conn.cursor()
+    created = 0
+    today = datetime.now(timezone.utc).date()
+    for i in range(8):
+        target_date = today + timedelta(days=i)
+        if _is_partition_covered(cursor, datetime.combine(target_date, datetime.min.time())):
+            continue
+        partition_name = f"gold_crypto_ohlcv_{target_date.strftime('%Y%m%d')}"
+        week_start = target_date - timedelta(days=target_date.weekday())
+        week_end = week_start + timedelta(days=7)
+        try:
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS gold.{partition_name}
+                PARTITION OF gold.gold_crypto_ohlcv
+                FOR VALUES FROM ('{week_start}') TO ('{week_end}')
+            """)
+            logger.info(f"[STARTUP_PARTITION] {partition_name}")
+            created += 1
+        except psycopg2.errors.DuplicateTable:
+            pass
+        except Exception as e:
+            if 'overlaps with' in str(e) or 'already exists' in str(e).lower():
+                pass
+            else:
+                logger.warning(f"[PARTITION_ERROR] {partition_name}: {e}")
+    cursor.close()
+    conn.close()
+    if created:
+        logger.info(f"[STARTUP] Created {created} partition(s)")
+    else:
+        logger.info("[STARTUP] All partitions up-to-date")
+
+
 def write_to_postgres(ohlcv_df: DataFrame, epoch_id: int):
     """Real-time upsert sink for PostgreSQL using psycopg2.
     
@@ -542,56 +676,8 @@ def write_to_postgres(ohlcv_df: DataFrame, epoch_id: int):
     symbols = [row["symbol"] for row in batch_df.select("symbol").distinct().collect()]
     min_timestamp_row = batch_df.agg(spark_min("timestamp").alias("min_timestamp")).collect()[0]
     min_timestamp = min_timestamp_row["min_timestamp"]
-
-    combined_df = batch_df
-    # Attempt to load a short window of recent history for rolling-feature accuracy.
-    # Build a safe SQL IN-list for symbols by doubling single quotes.
-    try:
-        if symbols and min_timestamp is not None:
-            symbol_filter = ", ".join(["'%s'" % s.replace("'", "''") for s in symbols])
-            history_cutoff = min_timestamp - timedelta(minutes=29)
-            history_query = (
-                "(SELECT timestamp, symbol, exchange, open, high, low, close, volume, "
-                "ingest_timestamp, process_timestamp, display_timestamp, record_count, "
-                "error_flag, error_messages, source_partition, source_offset, "
-                "log_returns, volatility_30m, z_score, is_outlier "
-                + "FROM gold.gold_crypto_ohlcv WHERE symbol IN (" + symbol_filter + ") "
-                + "AND timestamp >= TIMESTAMP '" + history_cutoff.strftime('%Y-%m-%d %H:%M:%S') + "') AS gold_history"
-            )
-            try:
-                history_df = (
-                    spark.read.format("jdbc")
-                    .option("url", DB_URL)
-                    .option("dbtable", history_query)
-                    .option("user", DB_USER)
-                    .option("password", DB_PASSWORD)
-                    .option("driver", "org.postgresql.Driver")
-                    .load()
-                    .withColumn("_is_current_batch", lit(False))
-                )
-                combined_df = history_df.unionByName(batch_df, allowMissingColumns=True)
-            except Exception as history_err:
-                logger.warning("[FEATURE_HISTORY_LOAD_ERROR] epoch_id=%s error=%s", epoch_id, history_err)
-    except Exception:
-        # Do not fail the batch if symbol quoting or date math fails; fall back to batch-only features.
-        logger.warning("[FEATURE_HISTORY_PREP_ERROR] epoch_id=%s proceeding without DB history", epoch_id)
-
-    enriched_df = enrich_ohlcv_features(combined_df)
-    current_df = (
-        enriched_df
-        .filter(col("_is_current_batch") == True)
-        .drop("_is_current_batch")
-        .orderBy("symbol", "timestamp")
-    )
-
-    rows = [row.asDict(recursive=True) for row in current_df.collect()]
-    row_count = len(rows)
-
-    if row_count == 0:
-        logger.info("[FOREACH_BATCH] epoch_id=%s empty batch, skipping", epoch_id)
-        return
-
-    logger.info("[FOREACH_BATCH] epoch_id=%s batch_size=%s", epoch_id, row_count)
+    max_timestamp_row = batch_df.agg(spark_max("timestamp").alias("max_timestamp")).collect()[0]
+    max_timestamp = max_timestamp_row["max_timestamp"]
 
     conn = psycopg2.connect(
         host=DB_HOST,
@@ -603,7 +689,61 @@ def write_to_postgres(ohlcv_df: DataFrame, epoch_id: int):
     cursor = conn.cursor()
 
     try:
-        latest_timestamps: dict[str, datetime] = {}
+        # === FIX: Ensure partitions exist before inserting ===
+        _ensure_partitions_for_batch(cursor, min_timestamp, max_timestamp)
+        conn.commit()
+
+        combined_df = batch_df
+        # Attempt to load a short window of recent history for rolling-feature accuracy.
+        # Build a safe SQL IN-list for symbols by doubling single quotes.
+        try:
+            if symbols and min_timestamp is not None:
+                symbol_filter = ", ".join(["'%s'" % s.replace("'", "''") for s in symbols])
+                history_cutoff = min_timestamp - timedelta(minutes=29)
+                history_query = (
+                    "(SELECT timestamp, symbol, exchange, open, high, low, close, volume, "
+                    "ingest_timestamp, process_timestamp, display_timestamp, record_count, "
+                    "error_flag, error_messages, source_partition, source_offset, "
+                    "log_returns, volatility_30m, z_score, is_outlier "
+                    + "FROM gold.gold_crypto_ohlcv WHERE symbol IN (" + symbol_filter + ") "
+                    + "AND timestamp >= TIMESTAMP '" + history_cutoff.strftime('%Y-%m-%d %H:%M:%S') + "') AS gold_history"
+                )
+                try:
+                    history_df = (
+                        spark.read.format("jdbc")
+                        .option("url", DB_URL)
+                        .option("dbtable", history_query)
+                        .option("user", DB_USER)
+                        .option("password", DB_PASSWORD)
+                        .option("driver", "org.postgresql.Driver")
+                        .load()
+                        .withColumn("_is_current_batch", lit(False))
+                    )
+                    combined_df = history_df.unionByName(batch_df, allowMissingColumns=True)
+                except Exception as history_err:
+                    logger.warning("[FEATURE_HISTORY_LOAD_ERROR] epoch_id=%s error=%s", epoch_id, history_err)
+        except Exception:
+            # Do not fail the batch if symbol quoting or date math fails; fall back to batch-only features.
+            logger.warning("[FEATURE_HISTORY_PREP_ERROR] epoch_id=%s proceeding without DB history", epoch_id)
+
+        enriched_df = enrich_ohlcv_features(combined_df)
+        current_df = (
+            enriched_df
+            .filter(col("_is_current_batch") == True)
+            .drop("_is_current_batch")
+            .orderBy("symbol", "timestamp")
+        )
+
+        rows = [row.asDict(recursive=True) for row in current_df.collect()]
+        row_count = len(rows)
+
+        if row_count == 0:
+            logger.info("[FOREACH_BATCH] epoch_id=%s empty batch, skipping", epoch_id)
+            return
+
+        logger.info("[FOREACH_BATCH] epoch_id=%s batch_size=%s", epoch_id, row_count)
+
+        latest_timestamps: dict = {}
         if symbols:
             cursor.execute(
                 """
@@ -748,11 +888,92 @@ def write_to_postgres(ohlcv_df: DataFrame, epoch_id: int):
         conn.close()
 
 
+def write_raw_ticks(raw_df: DataFrame, epoch_id: int):
+    """TRUE REALTIME: Write individual ticks directly to silver.raw_ticks (~5s latency)."""
+    logger = logging.getLogger(__name__)
+
+    try:
+        rows = [row.asDict(recursive=True) for row in raw_df.collect()]
+        row_count = len(rows)
+
+        if row_count == 0:
+            logger.info(f"[RAW_TICKS] epoch_id={epoch_id} zero rows, skipping")
+            return
+
+        logger.info(f"[RAW_TICKS] epoch_id={epoch_id} rows={row_count}")
+
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            port=int(DB_PORT),
+            database=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+        )
+        cursor = conn.cursor()
+        try:
+            insert_rows = []
+            for row in rows:
+                tick_ts = row.get("time")
+                ingest_ts = row.get("ingest_timestamp")
+                if tick_ts and hasattr(tick_ts, "to_pydatetime"):
+                    tick_ts = tick_ts.to_pydatetime()
+                if ingest_ts and hasattr(ingest_ts, "to_pydatetime"):
+                    ingest_ts = ingest_ts.to_pydatetime()
+
+                insert_rows.append((
+                    row.get("product_id"),
+                    row.get("exchange"),
+                    float(row["price"]) if row.get("price") is not None else None,
+                    float(row["size"]) if row.get("size") is not None else None,
+                    float(row["bid"]) if row.get("bid") is not None else None,
+                    float(row["ask"]) if row.get("ask") is not None else None,
+                    row.get("side"),
+                    tick_ts,
+                    ingest_ts,
+                    ingest_ts,
+                    int(row["source_partition"]) if row.get("source_partition") is not None else None,
+                    int(row["source_offset"]) if row.get("source_offset") is not None else None,
+                ))
+
+            execute_values(
+                cursor,
+                """
+                INSERT INTO silver.raw_ticks (
+                    symbol, exchange, price, size, bid, ask, side,
+                    tick_timestamp, ingest_timestamp, process_timestamp,
+                    source_partition, source_offset
+                ) VALUES %s
+                """,
+                insert_rows,
+                page_size=min(2000, row_count),
+            )
+
+            cursor.execute(
+                "DELETE FROM silver.raw_ticks WHERE tick_timestamp < CURRENT_TIMESTAMP - INTERVAL '1 hour'"
+            )
+
+            conn.commit()
+            logger.info(f"[RAW_TICKS_OK] epoch_id={epoch_id} written={row_count}")
+        except Exception as db_err:
+            conn.rollback()
+            logger.error(f"[RAW_TICKS_DB_ERROR] epoch_id={epoch_id} {db_err}")
+            raise
+        finally:
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        logger.error(f"[RAW_TICKS_FATAL] epoch_id={epoch_id} {type(e).__name__}: {e}", exc_info=True)
+        raise
+
+
 def main() -> None:
     configure_logging()
     logger = logging.getLogger(__name__)
     logger.info("Stream processor path: %s", os.path.abspath(__file__))
     logger.info(f"DB_HOST={DB_HOST}, WRITE_TO_DB={WRITE_TO_DB}, WRITE_TO_CONSOLE={WRITE_TO_CONSOLE}")
+
+    # Ensure partitions exist before starting (resilience for time-travel scenarios)
+    _ensure_future_partitions()
 
     ensure_heartbeat_table()
     start_heartbeat_thread()
@@ -785,19 +1006,34 @@ def main() -> None:
         )
         logger.info("Debug: writing raw validated ticks to console")
 
-    # Step 4: Aggregate to 1-minute OHLCV
+    # Step 4: Aggregate to 1-minute OHLCV (watermark handles late data)
     ohlcv_df = aggregate_to_ohlcv(valid_df)
     logger.info("OHLCV DataFrame Schema:")
     ohlcv_df.printSchema()
 
     # Step 5: Setup write paths
-    active_query = None
     dlq_query = None
 
     if dlq_df is not None:
         dlq_query = write_to_dead_letter_kafka(dlq_df)
         log_stream_progress(dlq_query, logger)
         logger.info(f"Writing rejected records to Kafka DLQ topic {DLQ_TOPIC}")
+
+    # ============================================================
+    # PATH 1: RAW TICKS → silver.raw_ticks  (TRUE REALTIME)
+    # ~5s lag: tick arrives → validated → written directly to Postgres
+    # Dashboard reads latest tick per symbol from this table
+    # ============================================================
+    raw_ticks_stream = (
+        valid_df.writeStream
+        .outputMode("append")
+        .option("checkpointLocation", f"{OHLCV_CHECKPOINT_LOCATION}/raw_ticks")
+        .trigger(processingTime="2 seconds")
+        .foreachBatch(write_raw_ticks)
+        .start()
+    )
+    log_stream_progress(raw_ticks_stream, logger)
+    logger.info("[REALTIME] Writing raw ticks to silver.raw_ticks (2s trigger)")
 
     # Path A: Write to console (for debugging)
     if WRITE_TO_CONSOLE:
@@ -806,17 +1042,20 @@ def main() -> None:
             log_stream_progress(active_query, logger)
             logger.info("Writing to console output")
 
-    # Path B: Write to PostgreSQL (production) - REAL-TIME MODE
+    # ============================================================
+    # PATH 2: OHLCV → gold.gold_crypto_ohlcv  (CANDLES)
+    # ~30s lag: ticks accumulate → 1-min window closed → written
+    # ============================================================
     active_query = (
         ohlcv_df.writeStream
-        .outputMode("update")
+        .outputMode("append")
         .option("checkpointLocation", f"{OHLCV_CHECKPOINT_LOCATION}/postgres")
-        .trigger(processingTime="500 milliseconds")
+        .trigger(processingTime="10 seconds")
         .foreachBatch(write_to_postgres)
         .start()
     )
     log_stream_progress(active_query, logger)
-    logger.info(f"Writing OHLCV to {DB_URL}")
+    logger.info(f"[CANDLES] Writing OHLCV to {DB_URL}")
 
     if FORCE_WRITE_RAW:
         raw_query = (
