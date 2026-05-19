@@ -391,14 +391,6 @@ def _setup_partitions():
         logger.info("[DB_SETUP] All partitions up-to-date")
 
 
-# ============================================================================
-# ML FEATURES COMPUTER (runs as background thread)
-# ============================================================================
-# Computes: log_returns, volatility_30m, z_score, is_outlier
-# Safe: only reads gold.gold_crypto_ohlcv, writes computed cols back.
-# Idempotent: runs every 30s and overwrites with latest values.
-# ============================================================================
-
 def _compute_ml_features() -> None:
     """Background thread: compute rolling ML features and write back to gold table."""
     logger = logging.getLogger(__name__ + ".ml_features")
@@ -411,7 +403,6 @@ def _compute_ml_features() -> None:
             conn.autocommit = True
             cursor = conn.cursor()
 
-            # Find all symbols with recent data
             cursor.execute("""
                 SELECT DISTINCT symbol FROM gold.gold_crypto_ohlcv
                 WHERE error_flag = FALSE
@@ -428,7 +419,6 @@ def _compute_ml_features() -> None:
 
             for symbol in symbols:
                 try:
-                    # Fetch last 60 candles for rolling window
                     cursor.execute("""
                         SELECT timestamp, close
                         FROM gold.gold_crypto_ohlcv
@@ -446,16 +436,14 @@ def _compute_ml_features() -> None:
                     timestamps = [r[0] for r in rows]
                     closes = [float(r[1]) for r in rows]
 
-                    # Compute log_returns: ln(close_t / close_t-1)
+                    import math
                     log_returns = []
                     for i in range(len(closes)):
                         if i == 0 or closes[i - 1] <= 0 or closes[i] <= 0:
                             log_returns.append(None)
                         else:
-                            import math
                             log_returns.append(math.log(closes[i] / closes[i - 1]))
 
-                    # Compute volatility_30m: rolling 30-min std dev of log_returns
                     volatility = []
                     for i in range(len(log_returns)):
                         window = log_returns[max(0, i - 29):i + 1]
@@ -467,7 +455,6 @@ def _compute_ml_features() -> None:
                         else:
                             volatility.append(None)
 
-                    # Compute rolling mean and std for z_score
                     rolling_mean = []
                     rolling_std = []
                     for i in range(len(closes)):
@@ -488,34 +475,24 @@ def _compute_ml_features() -> None:
                         else:
                             z_scores.append(None)
 
-                    # Build UPDATE rows (batch for efficiency)
-                    update_rows = []
+                    n_updated = 0
                     for i, ts in enumerate(timestamps):
-                        vr = volatility[i]
-                        vs = log_returns[i]
-                        zs = z_scores[i]
-                        is_out = abs(zs) >= 3.0 if zs is not None else False
-                        update_rows.append((vs, vr, zs, is_out, ts, symbol))
-
-                    # Batch UPDATE
-                    if update_rows:
-                        execute_values(
-                            cursor,
+                        cursor.execute(
                             """
-                            UPDATE gold.gold_crypto_ohlcv AS tgt SET
-                                log_returns = src.log_returns,
-                                volatility_30m = src.volatility_30m,
-                                z_score = src.z_score,
-                                is_outlier = src.is_outlier
-                            FROM (VALUES %s)
-                            AS src (log_returns, volatility_30m, z_score, is_outlier, ts, sym)
-                            WHERE tgt.timestamp = src.ts AND tgt.symbol = src.sym
+                            UPDATE gold.gold_crypto_ohlcv
+                            SET log_returns = %s,
+                                volatility_30m = %s,
+                                z_score = %s,
+                                is_outlier = %s
+                            WHERE timestamp = %s AND symbol = %s
                             """,
-                            update_rows,
-                            page_size=min(1000, len(update_rows)),
+                            (log_returns[i], volatility[i], z_scores[i],
+                             abs(z_scores[i]) >= 3.0 if z_scores[i] is not None else False,
+                             ts, symbol),
                         )
+                        n_updated += 1
 
-                    logger.debug(f"[ML_FEATURES] {symbol}: updated {len(update_rows)} candles")
+                    logger.debug(f"[ML_FEATURES] {symbol}: updated {n_updated} candles")
 
                 except Exception as e:
                     logger.warning(f"[ML_FEATURES] Error processing {symbol}: {e}")
@@ -526,7 +503,7 @@ def _compute_ml_features() -> None:
         except Exception as e:
             logger.warning(f"[ML_FEATURES] Compute loop error: {e}")
 
-        time.sleep(30)  # Re-compute every 30 seconds
+        time.sleep(30)
 
 
 # ============================================================================

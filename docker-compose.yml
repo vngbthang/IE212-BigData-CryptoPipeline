@@ -12,9 +12,11 @@
 services:
 
   # Kafka Topic Initializer (runs once before Kafka brokers)
-  # Ensures topics exist with proper retention settings even after multi-day downtime
+  # Uses custom Dockerfile to bake script in - avoids Windows line-ending issues
   kafka-init:
-    image: confluentinc/cp-kafka:7.3.0
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.kafka-init
     container_name: kafka-init
     depends_on:
       kafka-0:
@@ -24,9 +26,6 @@ services:
       KAFKA_INIT_TOPIC: crypto_ticks
       KAFKA_INIT_DLQ_TOPIC: crypto_ticks_dead_letter
       KAFKA_INIT_RETENTION_HOURS: "168"
-    volumes:
-      - ./docker/init_kafka_topics.sh:/init.sh:ro
-    entrypoint: ["/bin/bash", "/init.sh"]
     networks:
       - crypto-network
 

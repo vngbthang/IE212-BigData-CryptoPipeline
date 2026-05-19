@@ -1,0 +1,5 @@
+FROM confluentinc/cp-kafka:7.3.0
+
+COPY docker/init_kafka_topics.sh /init.sh
+
+ENTRYPOINT ["/bin/bash", "/init.sh"]
