@@ -23,7 +23,7 @@ import threading
 # CONFIGURATION
 # ============================================================================
 # Kafka Configuration
-KAFKA_BROKERS = os.getenv('KAFKA_BROKERS', 'kafka-0:29092,kafka-1:29093,kafka-2:29094')
+KAFKA_BROKERS = os.getenv('KAFKA_BROKERS', 'kafka-0:9092,kafka-1:9092,kafka-2:9092')
 KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'crypto_ticks')
 KAFKA_PARTITION_KEY_PREFIX = 'crypto'
 
@@ -105,13 +105,7 @@ AVRO_SCHEMA_STR = '''
       "doc": "Current best ask price"
     },
     {
-      "name": "side",
-      "type": {
-        "type": "enum",
-        "name": "TradeSide",
-        "symbols": ["buy", "sell", "unknown"]
-      },
-      "default": "unknown",
+      "name":     "side", "type": "string", "default": "unknown",
       "doc": "Trade side (buy/sell/unknown)"
     },
     {
@@ -289,15 +283,13 @@ class CoinbaseWebSocketClient:
     Handles auto-reconnection with exponential backoff.
     """
     
-    def __init__(self, schema, producer: Producer):
+    def __init__(self, producer: Producer):
         """
         Initialize WebSocket client.
-        
+
         Args:
-            schema: Avro schema for serialization
             producer: Kafka producer instance
         """
-        self.schema = schema
         self.producer = producer
         self.ws = None
         self.retry_count = 0
@@ -352,57 +344,51 @@ class CoinbaseWebSocketClient:
     def on_message(self, ws, message: str) -> None:
         """
         Callback when WebSocket message received.
-        
+
         Args:
             ws: WebSocket connection
             message: JSON message from Coinbase
         """
         try:
             data = json.loads(message)
-            
+
             # Filter: only process 'ticker' type messages (price ticks)
             if data.get('type') != 'ticker':
                 return
-            
-            # Map Coinbase JSON to Avro record
-            time_obj = datetime.fromisoformat(data['time'].replace('Z', '+00:00'))
-            tick_timestamp = int(time_obj.timestamp() * 1000)  # milliseconds
-            
-            tick_record = {
-                'timestamp': tick_timestamp,
-                'product_id': data['product_id'],
-                'exchange': 'coinbase',
-                'price': float(data.get('price', 0)),
-                'size': float(data.get('last_size', 0)),
-                'bid': float(data.get('best_bid')) if data.get('best_bid') else None,
-                'ask': float(data.get('best_ask')) if data.get('best_ask') else None,
-                'side': data.get('side', 'unknown').lower(),
-                'sequence': int(data.get('sequence', 0)),
-                'ingestion_timestamp': int(time.time() * 1000),
-            }
-            
-            # Serialize to Avro
-            avro_bytes = serialize_to_avro(tick_record, self.schema)
 
-            # Produce to Kafka with backpressure handling
-            # poll(0) serves pending delivery callbacks to free queue space
-            # If BufferError raised, poll and retry once
-            partition_key = f"{KAFKA_PARTITION_KEY_PREFIX}:{tick_record['product_id']}".encode()
+            # Map Coinbase JSON → JSON record for Spark Structured Streaming
+            # Stream processor expects: trade_id, symbol, price, size, timestamp, exchange, trade_type
+            time_str = data['time'].replace('Z', '+00:00')
+
+            tick_record = {
+                'trade_id':   data.get('trade_id', f"tick-{int(time.time()*1000)}"),
+                'symbol':     data['product_id'],
+                'price':      float(data.get('price', 0)),
+                'size':       float(data.get('last_size', 0)),
+                'timestamp':   time_str,
+                'exchange':   'coinbase',
+                'trade_type': data.get('side', 'unknown').lower(),
+            }
+
+            # Serialize to JSON for Spark Structured Streaming JSON parser
+            json_bytes = json.dumps(tick_record).encode('utf-8')
+
+            # Produce to Kafka
+            partition_key = f"{KAFKA_PARTITION_KEY_PREFIX}:{tick_record['symbol']}".encode()
             self.producer.poll(0)
             try:
                 self.producer.produce(
                     topic=KAFKA_TOPIC,
                     key=partition_key,
-                    value=avro_bytes,
+                    value=json_bytes,
                     on_delivery=kafka_delivery_report,
                 )
             except BufferError:
-                # Queue full - poll to drain completed deliveries, then retry
                 self.producer.poll(1)
                 self.producer.produce(
                     topic=KAFKA_TOPIC,
                     key=partition_key,
-                    value=avro_bytes,
+                    value=json_bytes,
                     on_delivery=kafka_delivery_report,
                 )
             
@@ -526,9 +512,6 @@ def main():
     logger.info("=" * 80)
     
     try:
-        # Load schema
-        schema = load_avro_schema()
-        
         # Create Kafka producer
         producer = create_kafka_producer()
 
@@ -536,7 +519,7 @@ def main():
         ensure_kafka_topic(producer)
 
         # Create and run WebSocket client
-        ws_client = CoinbaseWebSocketClient(schema, producer)
+        ws_client = CoinbaseWebSocketClient(producer)
         
         # Handle graceful shutdown
         def signal_handler(signum, frame):

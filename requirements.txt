@@ -1,0 +1,22 @@
+# Lakehouse Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# ── Spark / Iceberg ────────────────────────────────────────────────────────────
+pyspark==3.5.0
+iceberg-spark-runtime-3.5_2.12==1.4.3; python_version >= "3.9"
+hadoop-aws==3.3.4
+
+# ── Trino ──────────────────────────────────────────────────────────────────────
+trino==0.232.0
+trino-python-client==0.232.0
+
+# ── Streamlit Dashboard ────────────────────────────────────────────────────────
+streamlit==1.33.0
+plotly==5.22.0
+
+# ── Kafka (producer side) ──────────────────────────────────────────────────────
+kafka-python-ng==2.2.2
+
+# ── Airflow Provider ───────────────────────────────────────────────────────────
+apache-airflow-providers-trino==5.7.1
+apache-airflow==2.8.0
