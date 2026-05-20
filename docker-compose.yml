@@ -191,9 +191,9 @@ services:
       << : *kafka-env
       KAFKA_BROKER_ID: 2
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INSIDE:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:29093,INSIDE://localhost:9093
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29093,INSIDE://0.0.0.0:9093
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9093,INSIDE://kafka-2:29093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9093,INSIDE://0.0.0.0:29093
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LOG_DIRS: /var/lib/kafka/logs
     networks:
@@ -211,9 +211,9 @@ services:
       << : *kafka-env
       KAFKA_BROKER_ID: 3
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INSIDE:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:29094,INSIDE://localhost:9094
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29094,INSIDE://0.0.0.0:9094
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9094,INSIDE://kafka-3:29094
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9094,INSIDE://0.0.0.0:29094
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LOG_DIRS: /var/lib/kafka/logs
     networks:
@@ -309,42 +309,9 @@ services:
     volumes:
       - ./src:/app/src
       - ./sql:/app/sql
+      - ./docker:/app/docker
     working_dir: /app
-    entrypoint: >
-      /bin/sh -c "pip install boto3 -q &&
-                   /opt/spark/bin/spark-submit
-                   --master '$${SPARK_MASTER_URL}'
-                   --deploy-mode client
-                   --name 'CryptoPipeline-Iceberg'
-                   --conf spark.driver.memory=1g
-                   --conf spark.executor.memory=2g
-                   --conf spark.executor.cores=2
-                   --conf spark.task.cpus=1
-                   --conf spark.sql.shuffle.partitions=8
-                   --conf spark.default.parallelism=8
-                   --conf spark.streaming.stopGracefullyOnShutdown=true
-                   --conf spark.task.maxFailures=8
-                   --conf spark.streaming.backpressure.enabled=true
-                   --conf spark.executor.failuresValidityInterval=1h
-                   --conf spark.driver.host=spark-app
-                   --conf spark.driver.bindAddress=0.0.0.0
-                   --conf spark.network.timeout=300s
-                   --conf spark.executor.heartbeatInterval=60s
-                   --conf spark.sql.streaming.checkpointLocation=s3a://crypto-lake/checkpoints/gold_ohlcv
-                   --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.projectnessie.spark.extensions.NessieSparkSessionExtensions
-                   --conf spark.sql.catalog.nessie=org.apache.iceberg.spark.SparkCatalog
-                   --conf spark.sql.catalog.nessie.catalog-impl=org.apache.iceberg.nessie.NessieCatalog
-                   --conf spark.sql.catalog.nessie.uri=http://nessie:19120/api/v1
-                   --conf spark.sql.catalog.nessie.ref=main
-                   --conf spark.sql.catalog.nessie.warehouse=s3a://crypto-lake/warehouse
-                   --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
-                   --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000
-                   --conf spark.hadoop.fs.s3a.access.key=admin
-                   --conf spark.hadoop.fs.s3a.secret.key=password
-                   --conf spark.hadoop.fs.s3a.path.style.access=true
-                   --conf spark.sql.adaptive.enabled=true
-                   --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.4.3,org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.77.1,org.apache.hadoop:hadoop-aws:3.3.4,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1
-                   /app/src/processor/stream_processor.py"
+    entrypoint: /app/docker/spark-submit-wrapper.sh
     networks:
       - lakehouse
 
