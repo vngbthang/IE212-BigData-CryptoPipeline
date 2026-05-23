@@ -1,0 +1,11 @@
+streamlit
+duckdb
+boto3
+pytz
+pandas
+numpy
+plotly
+scikit-learn
+joblib
+xgboost
+tensorflow

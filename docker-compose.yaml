@@ -1,33 +1,14 @@
 version: "3"
 
 services:
+  # ── Catalog & Governance ────────────────────────────────────────────────────
   catalog:
     image: projectnessie/nessie
     container_name: catalog
     networks:
       data-lake-network:
-    ports:
-      - 19120:19120
 
-  trino:
-    image: trinodb/trino
-    container_name: trino
-    networks:
-      data-lake-network:
-    ports:
-      - 8080:8080
-    volumes:
-      - "./trino/trino_connections/iceberg_datalake.properties:/etc/trino/catalog/iceberg_datalake.properties"
-      - "./trino/coordinator-config.properties:/etc/trino/config.properties"
-
-  trino-worker:
-    image: trinodb/trino
-    networks:
-      data-lake-network:
-    volumes:
-      - "./trino/trino_connections/iceberg_datalake.properties:/etc/trino/catalog/iceberg_datalake.properties"
-      - "./trino/worker-1/worker-config.properties:/etc/trino/config.properties"
-
+  # ── Object Storage ──────────────────────────────────────────────────────────
   storage:
     image: minio/minio
     container_name: storage
@@ -49,11 +30,11 @@ services:
       - 9000:9000
     command: ["server", "/data", "--console-address", ":9001"]
 
-
+  # ── MinIO Client (bucket init) ─────────────────────────────────────────────
   mc:
     depends_on:
-      - storage
-      - catalog
+      storage:
+        condition: service_healthy
     image: minio/mc
     container_name: mc
     networks:
@@ -67,41 +48,16 @@ services:
       - AWS_DEFAULT_REGION=us-east-1
     entrypoint: >
       /bin/sh -c "
-      until (/usr/bin/mc config host add minio http://storage:9000 admin password) do echo '...waiting...' && sleep 1; done;
-      /usr/bin/mc mb -p minio/raw-zone;
-      /usr/bin/mc policy set public minio/raw-zone;
-      /usr/bin/mc rm -r --force minio/warehouse;
-      /usr/bin/mc mb minio/warehouse;
-      /usr/bin/mc mb minio/iceberg;
+      until (/usr/bin/mc alias set minio http://storage:9000 admin password) do echo '...waiting...' && sleep 1; done;
+      /usr/bin/mc mb -p minio/warehouse;
+      /usr/bin/mc anonymous set download minio/warehouse;
       /usr/bin/mc mb minio/checkpoints;
-      /usr/bin/mc policy set public minio/checkpoints;
-      /usr/bin/mc policy set public minio/warehouse;
-      /usr/bin/mc policy set public minio/iceberg;
-      tail -f /dev/null
+      /usr/bin/mc anonymous set download minio/checkpoints;
+      echo 'Buckets created successfully';
+      exit 0
       "
 
-  webservice:
-    build:
-      context: ./webservice
-    container_name: web-service-api
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      MINIO_ENDPOINT: storage:9000
-      MINIO_ACCESS_KEY: admin
-      MINIO_SECRET_KEY: password
-      UPLOADS_BUCKET_NAME: uploads
-    depends_on:
-      - kafka
-    ports:
-      - 8000:8000
-    networks:
-      - data-lake-network
-
+  # ── Event Streaming ─────────────────────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.6.1
     container_name: kafka
@@ -114,7 +70,6 @@ services:
       interval: 5s
       timeout: 10s
       retries: 10
-
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -134,30 +89,42 @@ services:
                while ! kafka-topics --bootstrap-server kafka:9092 --list > /dev/null 2>&1; do
                  sleep 1;
                done;
-               kafka-topics --bootstrap-server kafka:9092 --create --topic session_topic --if-not-exists --partitions 1 --replication-factor 1;
-               kafka-topics --bootstrap-server kafka:9092 --create --topic employee_topic --if-not-exists --partitions 1 --replication-factor 1;
-               kafka-topics --bootstrap-server kafka:9092 --create --topic client_topic --if-not-exists --partitions 1 --replication-factor 1;
+               kafka-topics --bootstrap-server kafka:9092 --create --topic session_topic   --if-not-exists --partitions 1 --replication-factor 1;
+               kafka-topics --bootstrap-server kafka:9092 --create --topic employee_topic  --if-not-exists --partitions 1 --replication-factor 1;
+               kafka-topics --bootstrap-server kafka:9092 --create --topic client_topic     --if-not-exists --partitions 1 --replication-factor 1;
+               kafka-topics --bootstrap-server kafka:9092 --create --topic crypto_ticks     --if-not-exists --partitions 3 --replication-factor 1 --config retention.ms=604800000;
+               kafka-topics --bootstrap-server kafka:9092 --alter --topic crypto_ticks --config retention.ms=604800000;
                wait"
 
+  # ── Processing (Spark) ─────────────────────────────────────────────────────
   spark:
     build:
-      context: .
-      dockerfile: ./spark/Dockerfile
+      context: ./spark
+      dockerfile: Dockerfile
     container_name: spark-master
     ports:
       - 7077:7077
-      - 8088:8080
+      - 4040:4040
     networks:
       - data-lake-network
     environment:
+      - SPARK_HOME=/opt/spark
+      - SPARK_CONF_DIR=/opt/spark/conf
       - AWS_ACCESS_KEY_ID=admin
       - AWS_SECRET_ACCESS_KEY=password
       - AWS_REGION=us-east-1
+      - JAVA_HOME=/opt/java/openjdk
+      - ivy_home=/tmp/.ivy2
     volumes:
       - ./spark-jobs:/app
+    depends_on:
+      mc:
+        condition: service_completed_successfully
     command: >
-      /opt/bitnami/spark/bin/spark-submit
+      /opt/spark/bin/spark-submit
       --master local[*]
+      --conf spark.driver.extraJavaOptions=-Divy.home=/tmp/.ivy2
+      --conf spark.executor.extraJavaOptions=-Divy.home=/tmp/.ivy2
       --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.projectnessie.spark.extensions.NessieSparkSessionExtensions
       --conf spark.sql.catalog.nessie=org.apache.iceberg.spark.SparkCatalog
       --conf spark.sql.catalog.nessie.catalog-impl=org.apache.iceberg.nessie.NessieCatalog
@@ -172,28 +139,42 @@ services:
       --conf spark.hadoop.fs.s3a.access.key=admin
       --conf spark.hadoop.fs.s3a.secret.key=password
       --conf spark.hadoop.fs.s3a.path.style.access=true
+      --conf spark.sql.streaming.checkpointLocation=s3a://warehouse/checkpoints/
+      --conf spark.driver.allowMultipleContexts=true
       /app/main.py
 
-  data-simulator:
+  # ── Crypto Data Feeder (direct Kafka producer — no FastAPI) ─────────────────
+  crypto-feeder:
     build:
       context: ./simulator
       dockerfile: Dockerfile
-    container_name: data-simulator
+    container_name: crypto-feeder
     environment:
-      - BASE_URL=http://webservice:8000
-      - SEND_INTERVAL=0.01 #(~100 msg/sec)
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: crypto_ticks
+      FETCH_INTERVAL: 2
+    networks:
+      data-lake-network:
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # ── Streamlit Dashboard ────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./src/dashboard
+      dockerfile: Dockerfile
+    container_name: crypto-dashboard
+    environment:
+      FRAGMENT_REFRESH_SECONDS: 5
+      MINIO_ENDPOINT: storage:9000
+      MINIO_ACCESS_KEY: admin
+      MINIO_SECRET_KEY: password
+      MINIO_BUCKET: warehouse
+    ports:
+      - 8501:8501
     networks:
       - data-lake-network
-    depends_on:
-      - webservice
-      - kafka
-    volumes:
-      - ./data:/app/data
-    deploy:
-      resources:
-        limits:
-          cpus: '0.3'
-          memory: 256M
 
 networks:
   data-lake-network:

@@ -1,28 +1,31 @@
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType, TimestampType
 
-pointer_schema = StructType([
-    StructField("file_name", StringType(), False),
-    StructField("file_path", StringType(), False)
+# Raw tick schema consumed from Kafka
+# Note: price/volume are StringType because the simulator serializes them as JSON strings
+# to avoid floating-point precision loss. Spark casts them implicitly in the SELECT.
+tick_schema = StructType([
+    StructField("symbol",    StringType(),    False),
+    StructField("price",     StringType(),    False),
+    StructField("volume",    StringType(),    False),
+    StructField("timestamp", TimestampType(), False),
+    StructField("exchange",  StringType(),    True),
 ])
 
-session_schema = StructType([
-    StructField("uuid", StringType(), False),
-    StructField("status", StringType(), False),
-    StructField("client_uuid", StringType(), False),
-    StructField("specialist_uuid", StringType(), False)
-])
-
-employee_schema = StructType([
-    StructField("uuid", StringType(), False),
-    StructField("first_name", StringType(), False),
-    StructField("last_name", StringType(), False),
-    StructField("email", StringType(), False),
-    StructField("role_uuid", StringType(), False)
-])
-
-client_schema = StructType([
-    StructField("uuid", StringType(), False),
-    StructField("client_name", StringType(), False),
-    StructField("industry", StringType(), False),
-    StructField("crm_account_id", IntegerType(), False)
+# OHLCV aggregation output schema — matches nessie.gold.crypto_ohlcv Iceberg table
+ohlcv_schema = StructType([
+    StructField("symbol",          StringType(),    False),
+    StructField("window_start",    TimestampType(), False),
+    StructField("window_end",      TimestampType(), False),
+    StructField("open",            DoubleType(),    False),
+    StructField("high",            DoubleType(),    False),
+    StructField("low",             DoubleType(),    False),
+    StructField("close",           DoubleType(),    False),
+    StructField("volume",          DoubleType(),    False),
+    StructField("tick_count",      DoubleType(),    False),
+    StructField("log_return",      DoubleType(),    True),
+    StructField("volatility_30m",  DoubleType(),   True),
+    StructField("z_score",         DoubleType(),    True),
+    StructField("anomaly_label",   StringType(),    True),
+    StructField("anomaly_score",   DoubleType(),    True),
+    StructField("ingestion_time",  TimestampType(), False),
 ])

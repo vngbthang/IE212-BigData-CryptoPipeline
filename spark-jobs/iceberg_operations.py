@@ -1,29 +1,59 @@
+"""Iceberg operations specific to the crypto pipeline: compaction and orphan-file cleanup."""
 import time
-from pyspark.sql.functions import col
+from pyspark.sql import SparkSession
 
-def count_files_iceberg(spark, table_name):
-    files_df = spark.read.format("iceberg").load(f"nessie.default.{table_name}.files")
+
+def count_data_files(spark: SparkSession, table_name: str) -> int:
+    files_df = spark.read.format("iceberg").load(f"nessie.gold.{table_name}.files")
     return files_df.count()
 
-def run_iceberg_compaction(spark, table_name, file_count_threshold, file_size_threshold, min_input_files):
-    current_file_count = count_files_iceberg(spark, table_name)
-    if current_file_count > file_count_threshold:
-        print("File count exceeds threshold. Triggering compaction...")
-        compaction_sql = f"""
+
+def compact_table(
+    spark: SparkSession,
+    table_name: str,
+    file_count_threshold: int = 200,
+    file_size_threshold: int = 64 * 1024 * 1024,
+    min_input_files: int = 5,
+) -> None:
+    count = count_data_files(spark, table_name)
+    print(f"[{table_name}] data file count: {count}")
+    if count > file_count_threshold:
+        print(f"[{table_name}] Triggering data-file compaction …")
+        spark.sql(f"""
             CALL nessie.system.rewrite_data_files(
-                table => 'nessie.default.{table_name}',
+                table => 'nessie.gold.{table_name}',
                 FILE_SIZE_THRESHOLD => {file_size_threshold},
                 MIN_INPUT_FILES => {min_input_files}
             )
-        """
-        spark.sql(compaction_sql).show(truncate=False)
+        """).show(truncate=False)
 
-def run_iceberg_orphan_files_cleanup(spark, table_name):
-    older_than_timestamp = int(time.time() * 1000) - 10000
-    cleanup_sql = f"""
+
+def remove_orphan_files(
+    spark: SparkSession,
+    table_name: str,
+    older_than_seconds: int = 3600,
+) -> None:
+    older_than_ms = int(time.time() * 1000) - older_than_seconds * 1000
+    print(f"[{table_name}] Removing orphan files older than {older_than_seconds}s …")
+    spark.sql(f"""
         CALL nessie.system.remove_orphan_files(
-            table => 'nessie.default.{table_name}',
-            older_than => {older_than_timestamp}
+            table   => 'nessie.gold.{table_name}',
+            older_than => {older_than_ms}
         )
-    """
-    spark.sql(cleanup_sql).show(truncate=False)
+    """).show(truncate=False)
+
+
+def expire_snapshots(
+    spark: SparkSession,
+    table_name: str,
+    older_than_hours: int = 24,
+) -> None:
+    older_than_ms = int(time.time() * 1000) - older_than_hours * 3600 * 1000
+    print(f"[{table_name}] Expiring snapshots older than {older_than_hours}h …")
+    spark.sql(f"""
+        CALL nessie.system.expire_snapshots(
+            table => 'nessie.gold.{table_name}',
+            older_than => {older_than_ms},
+            retain_last => 10
+        )
+    """).show(truncate=False)

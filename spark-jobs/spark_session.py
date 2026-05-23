@@ -1,15 +1,9 @@
 from pyspark.sql import SparkSession
 
-def create_spark_session():
-    return SparkSession.builder \
-        .appName("KafkaToIcebergStreaming") \
-        .config("spark.jars.packages",
-                "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.8.0,"
-                "org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.102.5,"
-                "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,"
-                "org.apache.kafka:kafka-clients:3.4.1,"
-                "org.apache.spark:spark-token-provider-kafka-0-10_2.12:3.5.1,"
-                "org.apache.hadoop:hadoop-aws:3.3.6") \
+
+def create_spark_session(app_name: str = "CryptoOHLCVStreaming") -> SparkSession:
+    builder = SparkSession.builder \
+        .appName(app_name) \
         .config("spark.sql.extensions",
                 "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,"
                 "org.projectnessie.spark.extensions.NessieSparkSessionExtensions") \
@@ -26,4 +20,14 @@ def create_spark_session():
         .config("spark.hadoop.fs.s3a.access.key", "admin") \
         .config("spark.hadoop.fs.s3a.secret.key", "password") \
         .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-        .getOrCreate()
+        .config("spark.sql.streaming.checkpointLocation", "s3a://warehouse/checkpoints/") \
+        .config("spark.driver.allowMultipleContexts", "true")
+
+    # Iceberg snapshot retention for time-travel and metadata cleanup
+    # Retains 1 hour of history for time-travel queries
+    builder = builder \
+        .config("spark.sql.catalog.nessie.write.wap.enabled", "true") \
+        .config("spark.sql.catalog.nessie.snapshot-age-grace", "3600000") \
+        .config("spark.sql.catalog.nessie.expire-snapshots-enabled", "true")
+
+    return builder.getOrCreate()

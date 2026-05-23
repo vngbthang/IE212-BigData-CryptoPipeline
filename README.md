@@ -1,101 +1,253 @@
-# Real-Time Data Lake Pipeline with Iceberg, Spark, and Kafka
+# Real-Time Crypto Trading Terminal
 
-A scalable, near-real-time data pipeline for ingesting, processing, and querying JSON data using Apache Iceberg, Spark Structured Streaming, and Kafka. Designed for ACID-compliant storage, efficient upserts, and seamless cloud deployment.
+Hệ thống xử lý dữ liệu crypto theo thời gian thực (real-time) sử dụng Apache Iceberg, Spark Structured Streaming, Kafka, và Streamlit Dashboard.
 
-## 📌 Features
+## Mục lục
 
-- **Near-Real-Time Ingestion**: API layer with FastAPI for JSON file uploads and Kafka for event streaming.
-- **ACID-Compliant Storage**: Apache Iceberg tables managed by Nessie Catalog for versioning and schema enforcement.
-- **Distributed Processing**: Spark Structured Streaming with micro-batches (0.1s intervals) for validation, deduplication, and merging.
-- **Optimized Querying**: Trino SQL engine for low-latency analytics and time-travel queries.
-- **Cloud-Ready**: Dockerized components (MinIO, Kafka, Spark, Nessie, Trino) with AWS deployment guidelines.
+- [Tính năng](#-tính-năng)
+- [Kiến trúc](#-kiến-trúc)
+- [Cấu trúc thư mục](#-cấu-trúc-thư-mục)
+- [Yêu cầu](#-yêu-cầu)
+- [Khởi động](#-khởi-động)
+- [Các dịch vụ](#-các-dịch-vụ)
+- [Truy cập](#-truy-cập)
+- [Monitoring](#-monitoring)
+- [Xử lý sự cố](#-xử-lý-sự-cố)
 
-## 🏗 Architecture
+## Tính năng
 
-![Data Lake Pipeline Architecture](docs/images/architecture.png)
+- **Real-Time Streaming**: Spark Structured Streaming xử lý dữ liệu từ Kafka với micro-batch 200ms
+- **ACID Storage**: Apache Iceberg với Nessie Catalog cho versioning và schema enforcement
+- **Biểu đồ Binance Style**: Streamlit dashboard với candlestick chart và technical indicators
+- **AI Signals**: ML models (LSTM, XGBoost, Isolation Forest) cho trend prediction và anomaly detection
+- **Timezone Support**: Tất cả hiển thị theo giờ Việt Nam (UTC+7)
 
-1. **API Layer**: FastAPI endpoints ingest JSON files into MinIO and publish metadata to Kafka.
-2. **Event Streaming**: Kafka decouples ingestion from processing, ensuring fault tolerance.
-3. **Spark Processing**: Micro-batch jobs validate, clean, and merge data into Iceberg tables.
-4. **Iceberg Storage**: Partitioned, compressed tables with ZSTD and automated compaction.
-5. **Trino Analytics**: SQL queries on Iceberg tables with Nessie versioning.
+## Kiến trúc
 
-## 🛠 Prerequisites
-- Docker & Docker Compose
-
-
-## 🚀 Getting Started
-
-### 1. Clone the Repository
-```bash
-git clone https://github.com/Elkoumy/real_time_data_lake.git
-````
-
-### 2. Start the Docker Containers
-```bash
-cd real_time_data_lake
+```
+┌─────────────────┐     ┌─────────────┐     ┌──────────────────┐
+│  Crypto Feeder  │────▶│   Kafka    │────▶│  Spark Streaming │
+│  (Simulator)    │     │ crypto_ticks│     │  Processing      │
+└─────────────────┘     └─────────────┘     └────────┬─────────┘
+                                                      │
+                                                      ▼
+┌─────────────────┐     ┌─────────────┐     ┌──────────────────┐
+│ Streamlit       │◀────│   DuckDB    │◀────│  MinIO (S3)      │
+│ Dashboard       │     │ + Iceberg   │     │  Iceberg Tables  │
+└─────────────────┘     └─────────────┘     └──────────────────┘
+                              ▲
+                              │
+                     ┌────────┴────────┐
+                     │    Nessie       │
+                     │    Catalog      │
+                     └─────────────────┘
 ```
 
+1. **Crypto Feeder**: Simulator gửi tick data (BTC, ETH) vào Kafka mỗi 2 giây
+2. **Kafka**: Event streaming platform với topic `crypto_ticks` (retention 7 ngày)
+3. **Spark Streaming**: Đọc từ Kafka, aggregate thành OHLCV candles (1 phút), ghi vào Iceberg
+4. **Iceberg + MinIO**: ACID-compliant storage với partitioning và compression
+5. **Nessie Catalog**: Git-like versioning cho Iceberg tables
+6. **Streamlit Dashboard**: Query Iceberg qua DuckDB, hiển thị real-time charts và AI signals
+
+## Cấu trúc thư mục
+
+```
+real_time_data_lake/
+├── docker-compose.yaml        # Docker orchestration
+├── simulator/                 # Crypto data simulator
+│   ├── simulator.py          # Gửi tick data vào Kafka
+│   └── Dockerfile
+├── spark-jobs/               # Spark Structured Streaming
+│   ├── main.py              # Main streaming job
+│   ├── schemas.py           # Data schemas (OHLCV)
+│   ├── data_processing.py   # Business logic
+│   ├── iceberg_operations.py # Iceberg write operations
+│   ├── table_creation.py    # Table initialization
+│   └── Dockerfile
+├── src/
+│   └── dashboard/           # Streamlit Dashboard
+│       ├── app.py           # Main dashboard app
+│       └── Dockerfile
+└── warehouse/                # MinIO data (bind mount hoặc S3)
+    └── gold/               # Iceberg tables
+        └── crypto_ohlcv_*/
+            ├── data/        # Parquet data files
+            └── metadata/    # Iceberg metadata
+```
+
+## Yêu cầu
+
+- Docker Desktop (Windows/macOS) hoặc Docker Engine (Linux)
+- 8GB+ RAM cho toàn bộ stack
+- Python 3.11+ (nếu chạy local)
+
+## Khởi động
+
+### 1. Start tất cả services
+
 ```bash
+cd real_time_data_lake
 docker-compose up -d
 ```
 
-## Services
-Services Included in the docker-compose file:
-- MinIO: S3-compatible object storage for JSON files.
-- Kafka: Distributed event streaming platform.
-- Spark: Unified analytics engine for big data processing.
-- Nessie: Git-like versioning for Iceberg tables.
-- Trino: Distributed SQL query engine for Iceberg tables.
-- FastAPI: Web API framework for JSON file uploads.
-- Data Simulator: Python script for generating sample JSON data upload requests.
+### 2. Kiểm tra trạng thái
 
-
-## 📂 Directory Structure
-
-```
-├── webservice/            # FastAPI upload service
-├── simulator/             # Upload JSON data simulator
-├── spark-jobs/            # Spark Structured Streaming jobs
-├── trino/                 # Trino configuration and queries
-├── docker-compose.yml     # Orchestration
-├── docs/                  # Architecture diagrams and notes
-└── data                   # Sample JSON data and schema
-```
-
-
-## 🖥 Usage
-### 1. Upload JSON Files via API
 ```bash
-curl -X POST -F "file=@data/employees/employees_4.json" http://localhost:8000/upload/employees_4
-
+docker ps --format "table {{.Names}}\t{{.Status}}"
 ```
 
-### 2. Query Data with Trino
+Output mong đợi:
+```
+NAMES              STATUS
+spark-master       Up (healthy)
+crypto-feeder      Up
+crypto-dashboard   Up
+storage           Up (healthy)
+kafka            Up (healthy)
+catalog          Up
+```
+
+### 3. Chờ 30-60 giây để Spark job khởi động và bắt đầu xử lý
+
+## Các dịch vụ
+
+| Service | Port | Mô tả |
+|---------|------|--------|
+| Dashboard | 8501 | Streamlit dashboard (xem biểu đồ, signals) |
+| MinIO Console | 9001 | MinIO web console (user: admin, pass: password) |
+| Spark UI | 4040 | Spark Structured Streaming UI |
+| Kafka | 9092 | Kafka broker (internal) |
+| Nessie | 19120 | Nessie catalog API (internal) |
+
+## Truy cập
+
+### Dashboard
+```
+http://localhost:8501
+```
+
+Dashboard bao gồm:
+- Real-time candlestick chart (Binance style)
+- AI Signals: LSTM Trend, XGBoost Risk, Whale Alert
+- Pipeline Status: Lag indicator, Last Candle time
+- Market stats: Price, Volume, RSI, Volatility
+
+### MinIO Console
+```
+http://localhost:9001
+```
+- Username: `admin`
+- Password: `password`
+
+### Spark UI
+```
+http://localhost:4040
+```
+
+## Monitoring
+
+### Kiểm tra Kafka consumer lag
+
 ```bash
-docker exec -it trino trino
-```
-Run queries:
-```sql
-SELECT * FROM iceberg_datalake.default.sessions;
+docker exec kafka kafka-consumer-groups --bootstrap-server kafka:9092 --all-groups --describe
 ```
 
-## ☁️ AWS Deployment
-To deploy on AWS:
-1. Replace MinIO with Amazon S3.
-2. Use EMR for Spark and MSK for Kafka.
-3. Migrate Nessie Catalog to AWS Glue Catalog.
-4. Deploy Fast API on EC2 or Fargate behind an ALB.
-5. Use Trino on EMR or Athena for querying.
+### Kiểm tra Spark batch progress
 
-## 📝 License
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+```bash
+docker logs --since 30s spark-master 2>&1 | Select-String "OffsetsBehindLatest"
+```
 
----
+Output mong đợi: `"maxOffsetsBehindLatest" : "0"`
 
-**Built with**:  
-[Apache Iceberg](https://iceberg.apache.org/) | [Spark](https://spark.apache.org/) | [Kafka](https://kafka.apache.org/) | [Trino](https://trino.io/) | [Docker](https://www.docker.com/)  
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Spark](https://img.shields.io/badge/Apache_Spark-3.5+-red.svg)](https://spark.apache.org/)
-[![Docker](https://img.shields.io/badge/Docker-Containers-blue)](https://www.docker.com/)
-[![GitHub Stars](https://img.shields.io/github/stars/your-username/repo-name?style=social)](https://github.com/Elkoumy/real_time_data_lake)
+### Kiểm tra Iceberg metadata files
+
+```bash
+docker exec storage mc ls minio/warehouse/gold/crypto_ohlcv_*/metadata/ | Select-Object -Last 5
+```
+
+### Kiểm tra dashboard data freshness
+
+```bash
+docker exec crypto-dashboard python -c "import duckdb; ..."
+```
+
+## Xử lý sự cố
+
+### Dashboard hiển thị dữ liệu cũ
+
+1. Force refresh trình duyệt: `Ctrl+Shift+R` (Windows) hoặc `Cmd+Shift+R` (Mac)
+2. Hoặc mở trong tab ẩn danh
+3. Kiểm tra data freshness:
+
+```bash
+docker exec crypto-dashboard python -c "
+import boto3
+from botocore.config import Config
+import duckdb
+from datetime import datetime, timezone, timedelta
+
+s3 = boto3.client('s3', endpoint_url='http://storage:9000',
+    aws_access_key_id='admin', aws_secret_access_key='password',
+    region_name='us-east-1', config=Config(signature_version='s3v4'))
+resp = s3.list_objects_v2(Bucket='warehouse', Prefix='gold/', Delimiter='/')
+# ... check latest metadata
+"
+```
+
+### Spark job dừng xử lý
+
+1. Restart Spark:
+
+```bash
+docker restart spark-master
+```
+
+2. Kiểm tra logs:
+
+```bash
+docker logs --since 60s spark-master 2>&1
+```
+
+### Kafka topic có vấn đề retention
+
+Mặc định topic `crypto_ticks` có retention 7 ngày. Nếu cần thay đổi:
+
+```bash
+docker exec kafka kafka-configs --bootstrap-server kafka:9092 \
+    --alter --topic crypto_ticks --add-config retention.ms=604800000
+```
+
+### Reset toàn bộ pipeline
+
+```bash
+# Stop all
+docker-compose down
+
+# Xóa data cũ (optional)
+docker volume rm real_time_data_lake_warehouse
+
+# Restart
+docker-compose up -d
+```
+
+## Kỹ thuật
+
+### Data Flow
+
+1. **Tick Data**: `symbol, price, volume, timestamp`
+2. **Spark Aggregation**: Tumbling window 1 phút → OHLCV candle
+3. **Iceberg Write**: Append-only với partition by date
+4. **Dashboard Query**: DuckDB iceberg_scan() → Streamlit visualization
+
+### Key Configurations
+
+- **Spark Trigger**: 200ms micro-batch
+- **Kafka Retention**: 7 ngày (604800000ms)
+- **Iceberg Partition**: By day (window_start)
+- **Dashboard Refresh**: 5 giây (fragment)
+
+## License
+
+MIT License
