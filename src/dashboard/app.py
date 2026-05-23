@@ -139,14 +139,32 @@ def resolve_latest_metadata() -> str | None:
         return None
 
 
+def _load_duckdb_extension(conn: duckdb.DuckDBPyConnection, extension_name: str) -> None:
+    try:
+        conn.execute(f"LOAD {extension_name};")
+        return
+    except Exception as load_error:
+        logger.warning("DuckDB extension '%s' was not preinstalled: %s", extension_name, load_error)
+
+    try:
+        conn.execute(f"INSTALL {extension_name};")
+        conn.execute(f"LOAD {extension_name};")
+    except Exception as install_error:
+        raise RuntimeError(
+            f"DuckDB extension '{extension_name}' is unavailable. "
+            "Rebuild the dashboard image with network access so the extension is "
+            "installed during Docker build: docker compose build dashboard"
+        ) from install_error
+
+
 def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
     """
     Step B: Initialize DuckDB in-memory connection with S3/Iceberg extensions.
     Configured to point to local MinIO.
     """
     conn = duckdb.connect(database=":memory:")
-    conn.execute("INSTALL httpfs; LOAD httpfs;")
-    conn.execute("INSTALL iceberg; LOAD iceberg;")
+    _load_duckdb_extension(conn, "httpfs")
+    _load_duckdb_extension(conn, "iceberg")
 
     # Configure S3 endpoints to point to local MinIO
     conn.execute(f"SET s3_endpoint='{MINIO_ENDPOINT}';")
@@ -204,21 +222,25 @@ def fetch_ohlcv(symbol: str, limit: int = 200) -> pd.DataFrame | None:
         conn = get_duckdb_connection()
 
         query = f"""
-            SELECT
-                symbol,
-                window_start,
-                window_end,
-                open,
-                high,
-                low,
-                close,
-                volume,
-                tick_count,
-                ingestion_time
-            FROM iceberg_scan('{metadata_uri}')
-            WHERE symbol = '{symbol}'
+            SELECT *
+            FROM (
+                SELECT
+                    symbol,
+                    window_start,
+                    window_end,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                    tick_count,
+                    ingestion_time
+                FROM iceberg_scan('{metadata_uri}')
+                WHERE symbol = '{symbol}'
+                ORDER BY window_start DESC
+                LIMIT {limit}
+            )
             ORDER BY window_start ASC
-            LIMIT {limit}
         """
 
         df = conn.execute(query).df()

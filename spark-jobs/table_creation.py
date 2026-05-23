@@ -2,7 +2,7 @@
 
 Storage optimizations applied:
   - write.format.default         = 'parquet'
-  - write.parquet.compression-codec = 'zstd'   (fastest decompression for Trino)
+  - write.parquet.compression-codec = 'zstd'   (fast decompression for analytic reads)
   - write.object-storage.enabled = 'true'      (deterministic hash-path on MinIO,
                                                 bypasses linear dir-indexing)
   - write.metadata.delete-after-commit.enabled = 'true'
@@ -58,7 +58,7 @@ def create_tables(spark: SparkSession) -> None:
             'write.wap.enabled'                      = 'true',
             -- Garbage collection
             'gc-enabled'                              = 'true',
-            -- Split sizing for Trino/DuckDB predicate pushdown
+            -- Split sizing for analytic predicate pushdown
             'read.split.target-size'                   = '134217728'
         )
     """)

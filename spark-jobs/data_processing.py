@@ -15,7 +15,7 @@ from pyspark.sql.functions import (
     sum as spark_sum, count,
     array_min, array_max,
     sort_array, collect_list, struct,
-    lit, cast as spark_cast,
+    lit,
 )
 from schemas import tick_schema
 
@@ -76,7 +76,7 @@ def _compute_ohlcv(ticks_df: DataFrame) -> DataFrame:
 
 
 def _write_ohlcv(df: DataFrame, batch_id: int) -> None:
-    from pyspark.sql.functions import lit, current_timestamp, cast as spark_cast, expr
+    from pyspark.sql.functions import current_timestamp
 
     insert_df = df.select(
         col("symbol"),

@@ -1,13 +1,14 @@
 """Crypto Data Feeder — streams live BTC/USDT and ETH/USDT ticks from Binance
 via ccxt and writes them DIRECTLY to Kafka using confluent-kafka Producer.
 
-No FastAPI dependency. Low-latency optimized:
+Direct producer implementation. Low-latency optimized:
   - linger.ms=5       : flush every 5ms (vs default 5ms, tuned for low latency)
   - compression=none   : skip CPU compression overhead
   - acks=1            : wait for leader only (not full ISR)
 """
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -16,8 +17,8 @@ import ccxt
 from confluent_kafka import Producer
 
 # ── Kafka Tuning ──────────────────────────────────────────────────────────────
-KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
-KAFKA_TOPIC = "crypto_ticks"
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "crypto_ticks")
 
 # Low-latency producer config
 PRODUCER_CONF = {
@@ -31,8 +32,12 @@ PRODUCER_CONF = {
     "message.timeout.ms": "10000",
 }
 
-SYMBOLS = ["BTC/USDT", "ETH/USDT"]
-FETCH_INTERVAL = 2  # seconds between ticks
+SYMBOLS = [
+    symbol.strip()
+    for symbol in os.getenv("SYMBOLS", "BTC/USDT,ETH/USDT").split(",")
+    if symbol.strip()
+]
+FETCH_INTERVAL = float(os.getenv("FETCH_INTERVAL", "2"))  # seconds between ticks
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,12 +91,17 @@ def fetch_and_publish(exchange: ccxt.Exchange, producer: Producer, symbol: str) 
         )
         logger.info("→ Kafka %s  price=%.4f  volume=%.6f", symbol, ohlcv["last"], ohlcv["baseVolume"])
     except Exception as exc:
-        logger.error("Error fetching %s: %s", symbol, exc)
+        logger.error(
+            "Binance fetch failed for %s. Check network access, Binance availability, "
+            "or regional restrictions. Error: %s",
+            symbol,
+            exc,
+        )
 
 
 def main() -> None:
-    logger.info("Starting Crypto Kafka Feeder (direct — no FastAPI)")
-    logger.info("Kafka: %s  Topic: %s  Symbols: %s  Interval: %ds",
+    logger.info("Starting Crypto Kafka Feeder (direct Kafka producer)")
+    logger.info("Kafka: %s  Topic: %s  Symbols: %s  Interval: %ss",
                 KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, SYMBOLS, FETCH_INTERVAL)
 
     producer = Producer(PRODUCER_CONF)
@@ -99,6 +109,15 @@ def main() -> None:
 
     exchange = ccxt.binance({"enableRateLimit": True})
     logger.info("ccxt exchange: %s (rate limit: %s)", exchange.id, exchange.rateLimit)
+    try:
+        exchange.load_markets()
+    except Exception as exc:
+        logger.error(
+            "Unable to reach Binance during startup. The feeder will keep running and "
+            "retry each fetch loop, but no ticks will be produced until Binance is reachable. "
+            "Error: %s",
+            exc,
+        )
 
     # Wait for Kafka to be ready
     logger.info("Waiting for Kafka broker at %s ...", KAFKA_BOOTSTRAP_SERVERS)

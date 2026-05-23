@@ -1,10 +1,14 @@
-version: "3"
-
 services:
   # ── Catalog & Governance ────────────────────────────────────────────────────
   catalog:
-    image: projectnessie/nessie
+    image: projectnessie/nessie:0.76.6
     container_name: catalog
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:19120/api/v1/config || wget -qO- http://localhost:19120/api/v1/config || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     networks:
       data-lake-network:
 
@@ -118,6 +122,10 @@ services:
     volumes:
       - ./spark-jobs:/app
     depends_on:
+      catalog:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
       mc:
         condition: service_completed_successfully
     command: >
@@ -143,7 +151,7 @@ services:
       --conf spark.driver.allowMultipleContexts=true
       /app/main.py
 
-  # ── Crypto Data Feeder (direct Kafka producer — no FastAPI) ─────────────────
+  # ── Crypto Data Feeder (direct Kafka producer) ──────────────────────────────
   crypto-feeder:
     build:
       context: ./simulator
@@ -175,6 +183,9 @@ services:
       - 8501:8501
     networks:
       - data-lake-network
+    depends_on:
+      mc:
+        condition: service_completed_successfully
 
 networks:
   data-lake-network:

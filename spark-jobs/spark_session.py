@@ -16,6 +16,7 @@ def create_spark_session(app_name: str = "CryptoOHLCVStreaming") -> SparkSession
         .config("spark.sql.catalog.nessie.cache-enabled", "true") \
         .config("spark.sql.catalog.nessie.gc-enabled", "true") \
         .config("spark.sql.defaultCatalog", "nessie") \
+        .config("spark.sql.shuffle.partitions", "4") \
         .config("spark.hadoop.fs.s3a.endpoint", "http://storage:9000") \
         .config("spark.hadoop.fs.s3a.access.key", "admin") \
         .config("spark.hadoop.fs.s3a.secret.key", "password") \

@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN python -c "import duckdb; conn = duckdb.connect(':memory:'); conn.execute('INSTALL httpfs;'); conn.execute('INSTALL iceberg;'); conn.close()"
 
 COPY . .
 
