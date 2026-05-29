@@ -1,0 +1,68 @@
+[
+  {
+    "symbol": "BTC/USDT",
+    "split_sizes": {
+      "train": 90655,
+      "validation": 19426,
+      "test": 19427
+    },
+    "rows_dropped": {
+      "shift_target": 1,
+      "feature_engineering_history": 60
+    },
+    "feature_count": 55,
+    "baseline_rmse_val": 2.8193557969526837e-05,
+    "baseline_rmse_test": 2.3631859713898763e-05,
+    "proxy_rmse_val": 2.208290125571836e-05,
+    "proxy_rmse_test": 1.8669737498182573e-05,
+    "xgboost_rmse_val": 2.125515234239643e-05,
+    "xgboost_rmse_test": 1.767691660057757e-05,
+    "best_params": {
+      "learning_rate": 0.1,
+      "max_depth": 3,
+      "n_estimators": 100,
+      "subsample": 1.0,
+      "colsample_bytree": 1.0,
+      "min_child_weight": 1
+    },
+    "search_stage": "stage_1",
+    "accepted": true,
+    "artifacts": {
+      "model_path": "artifacts/xgboost/xgboost_vol_btcusdt.pkl",
+      "feature_importance_path": "artifacts/xgboost/feature_importance_btcusdt.png"
+    }
+  },
+  {
+    "symbol": "ETH/USDT",
+    "split_sizes": {
+      "train": 90656,
+      "validation": 19426,
+      "test": 19427
+    },
+    "rows_dropped": {
+      "shift_target": 1,
+      "feature_engineering_history": 60
+    },
+    "feature_count": 55,
+    "baseline_rmse_val": 3.2290778623426026e-05,
+    "baseline_rmse_test": 4.116352038788613e-05,
+    "proxy_rmse_val": 2.5414959191373834e-05,
+    "proxy_rmse_test": 3.1618527760572746e-05,
+    "xgboost_rmse_val": 2.4131365504056847e-05,
+    "xgboost_rmse_test": 3.043713735124203e-05,
+    "best_params": {
+      "learning_rate": 0.1,
+      "max_depth": 3,
+      "n_estimators": 100,
+      "subsample": 1.0,
+      "colsample_bytree": 1.0,
+      "min_child_weight": 1
+    },
+    "search_stage": "stage_1",
+    "accepted": true,
+    "artifacts": {
+      "model_path": "artifacts/xgboost/xgboost_vol_ethusdt.pkl",
+      "feature_importance_path": "artifacts/xgboost/feature_importance_ethusdt.png"
+    }
+  }
+]
