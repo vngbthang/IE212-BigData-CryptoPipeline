@@ -58,9 +58,14 @@ function Wait-ForCondition {
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        if (& $Condition) {
-            Write-Host "PASS: $Label" -ForegroundColor Green
-            return $true
+        try {
+            if (& $Condition) {
+                Write-Host "PASS: $Label" -ForegroundColor Green
+                return $true
+            }
+        }
+        catch {
+            return $false
         }
         Start-Sleep -Seconds $IntervalSeconds
     }
@@ -86,22 +91,60 @@ function Get-ComposeLogs {
 }
 
 Write-Host "Validating Docker Compose configuration..."
-docker compose config | Out-Null
-Write-Host "PASS: docker compose config" -ForegroundColor Green
+try {
+    $oldPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $null = docker compose config 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "PASS: docker compose config" -ForegroundColor Green
+    }
+    else {
+        Add-Failure "docker compose config failed with exit code $LASTEXITCODE"
+    }
+}
+catch {
+    Add-Failure "docker compose config threw an error: $($_.Exception.Message)"
+}
+finally {
+    $ErrorActionPreference = $oldPreference
+}
 
 Write-Host "Building and starting the full verified pipeline..."
-docker compose up -d --build
+try {
+    $oldPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $null = docker compose up -d --build 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Add-Failure "docker compose up -d --build failed with exit code $LASTEXITCODE"
+    }
+}
+catch {
+    Add-Failure "docker compose up -d --build threw an error: $($_.Exception.Message)"
+}
+finally {
+    $ErrorActionPreference = $oldPreference
+}
 
 Write-Host ""
 Write-Host "Current service status:"
-docker compose ps
+try {
+    $oldPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    docker compose ps
+}
+catch {
+    Add-Failure "docker compose ps threw an error: $($_.Exception.Message)"
+}
+finally {
+    $ErrorActionPreference = $oldPreference
+}
 
 Write-Host ""
 Write-Host "Waiting for core service readiness..."
 
 foreach ($service in @("catalog", "storage", "kafka")) {
     $serviceName = $service
-    $condition = { Test-ServiceHealthy $serviceName }.GetNewClosure()
+    $condition = { Test-ServiceHealthy $serviceName }
     $ok = Wait-ForCondition "$serviceName is healthy" $condition -TimeoutSeconds 90 -IntervalSeconds 5
     if (-not $ok) {
         Add-Failure "$serviceName did not become healthy"
@@ -110,7 +153,7 @@ foreach ($service in @("catalog", "storage", "kafka")) {
 
 foreach ($service in @("crypto-feeder", "spark")) {
     $serviceName = $service
-    $condition = { Test-ServiceRunning $serviceName }.GetNewClosure()
+    $condition = { Test-ServiceRunning $serviceName }
     $ok = Wait-ForCondition "$serviceName is running" $condition -TimeoutSeconds 60 -IntervalSeconds 5
     if (-not $ok) {
         Add-Failure "$serviceName is not running"

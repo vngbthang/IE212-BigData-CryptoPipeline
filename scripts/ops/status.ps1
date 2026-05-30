@@ -2,53 +2,132 @@ $ErrorActionPreference = "Stop"
 
 Set-Location (Join-Path $PSScriptRoot "..\..")
 
+$Failures = New-Object System.Collections.Generic.List[string]
+$Warnings = New-Object System.Collections.Generic.List[string]
+
+function Add-Failure {
+    param([string]$Message)
+    $Failures.Add($Message) | Out-Null
+    Write-Host "FAIL: $Message" -ForegroundColor Red
+}
+
+function Add-Warning {
+    param([string]$Message)
+    $Warnings.Add($Message) | Out-Null
+    Write-Host "WARNING: $Message" -ForegroundColor Yellow
+}
+
 function Write-Section {
     param([string]$Title)
     Write-Host ""
     Write-Host "== $Title =="
 }
 
-function Test-ServiceHealthy {
-    param(
-        [string]$ServiceName,
-        [string]$ContainerName
-    )
+function Get-ServiceContainerId {
+    param([string]$ServiceName)
+    try {
+        $containerId = docker compose ps -q $ServiceName 2>$null
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($containerId)) {
+            return $null
+        }
+        return $containerId.Trim()
+    }
+    catch {
+        return $null
+    }
+}
 
-    $state = docker inspect --format "{{.State.Health.Status}}" $ContainerName 2>$null
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($state)) {
-        Write-Host "$ServiceName health: unavailable"
-        return
+function Test-ServiceRunning {
+    param([string]$ServiceName)
+    $containerId = Get-ServiceContainerId $ServiceName
+    if ($null -eq $containerId) {
+        return $false
     }
 
-    Write-Host "$ServiceName health: $state"
+    try {
+        $running = docker inspect -f "{{.State.Running}}" $containerId 2>$null
+        return ($LASTEXITCODE -eq 0 -and $running.Trim() -eq "true")
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-ServiceHealthy {
+    param([string]$ServiceName)
+    $containerId = Get-ServiceContainerId $ServiceName
+    if ($null -eq $containerId) {
+        return $false
+    }
+
+    try {
+        $health = docker inspect -f "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}" $containerId 2>$null
+        return ($LASTEXITCODE -eq 0 -and $health.Trim() -eq "healthy")
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-ComposeLogs {
+    param(
+        [string]$ServiceName,
+        [int]$Tail = 200
+    )
+
+    $oldPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $logs = docker compose logs --tail $Tail $ServiceName 2>&1
+        if ($LASTEXITCODE -ne 0 -and [string]::IsNullOrWhiteSpace(($logs -join ""))) {
+            return $null
+        }
+        return ($logs -join "`n")
+    }
+    catch {
+        return $null
+    }
+    finally {
+        $ErrorActionPreference = $oldPreference
+    }
 }
 
 Write-Section "Compose Services"
-docker compose ps
+try {
+    docker compose ps
+}
+catch {
+    Add-Failure "docker compose ps threw an error: $($_.Exception.Message)"
+}
 
 Write-Section "Health Checks"
-Test-ServiceHealthy -ServiceName "catalog" -ContainerName "catalog"
-Test-ServiceHealthy -ServiceName "storage" -ContainerName "storage"
-Test-ServiceHealthy -ServiceName "kafka" -ContainerName "kafka"
+foreach ($service in @("catalog", "storage", "kafka")) {
+    if (Test-ServiceHealthy $service) {
+        Write-Host "$service health: healthy"
+    }
+    elseif (Test-ServiceRunning $service) {
+        Add-Failure "$service is running but not healthy"
+    }
+    else {
+        Add-Failure "$service is not running or unavailable"
+    }
+}
 
 Write-Section "Spark Iceberg Writes"
-try {
-    $sparkLogs = & docker compose logs --tail 300 spark 2>&1
-    $sparkWrites = $sparkLogs | Select-String -Pattern "Batch .* written to nessie.gold.crypto_ohlcv"
-    if ($sparkWrites) {
-        Write-Host "Spark writes: found"
-        $sparkWrites | Select-Object -Last 5
-    } else {
-        Write-Host "Spark writes: not found in the last 300 Spark log lines"
-    }
-} catch {
-    Write-Host "Spark writes: log hint unavailable"
-    Write-Host "Warning: $($_.Exception.Message)"
-    Write-Host "Continuing to the real DuckDB/Iceberg data check..."
+$sparkLogs = Get-ComposeLogs "spark" 300
+if ([string]::IsNullOrWhiteSpace($sparkLogs)) {
+    Add-Warning "Spark logs are unavailable or Spark is not running"
+}
+elseif ($sparkLogs -match "written to nessie\.gold\.crypto_ohlcv") {
+    Write-Host "Spark writes: found"
+}
+else {
+    Add-Failure "Spark write evidence was not found in the last 300 Spark log lines"
 }
 
 Write-Section "Iceberg Data Check"
-$dataCheckScript = @'
+if (Test-ServiceRunning "dashboard") {
+    $dataCheckScript = @'
 import os
 import sys
 
@@ -123,22 +202,51 @@ except Exception as exc:
     sys.exit(1)
 '@
 
-try {
-    $dataCheckScript | docker compose exec -T dashboard python -
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Iceberg data check: failed"
+    try {
+        $dataCheckScript | docker compose exec -T dashboard python -
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Iceberg data check: PASS"
+        }
+        else {
+            Add-Failure "Iceberg data check failed with exit code $LASTEXITCODE"
+        }
     }
-} catch {
-    Write-Host "Iceberg data check: failed"
-    Write-Host "Error: $($_.Exception.Message)"
-    Write-Host "Action: ensure the dashboard container is running, then rerun .\scripts\ops\status.ps1"
+    catch {
+        Add-Failure "Iceberg data check could not be executed: $($_.Exception.Message)"
+    }
+}
+else {
+    Add-Warning "Dashboard container is not running; skipping DuckDB/Iceberg data check"
 }
 
 Write-Section "Dashboard"
 try {
     $response = Invoke-WebRequest -Uri "http://localhost:8501" -UseBasicParsing -TimeoutSec 10
     Write-Host "Dashboard reachable: HTTP $($response.StatusCode)"
-} catch {
-    Write-Host "Dashboard reachable: no"
-    Write-Host "Error: $($_.Exception.Message)"
 }
+catch {
+    Add-Failure "Dashboard did not return HTTP 200 at http://localhost:8501"
+}
+
+Write-Section "Summary"
+if ($Failures.Count -eq 0 -and $Warnings.Count -eq 0) {
+    Write-Host "STATUS PASS: all required checks passed" -ForegroundColor Green
+    exit 0
+}
+
+if ($Failures.Count -eq 0) {
+    Write-Host "STATUS WARNING: the stack is up, but one or more checks need attention" -ForegroundColor Yellow
+    foreach ($warning in $Warnings) {
+        Write-Host "- $warning" -ForegroundColor Yellow
+    }
+    exit 0
+}
+
+Write-Host "STATUS FAIL: one or more required checks failed" -ForegroundColor Red
+foreach ($failure in $Failures) {
+    Write-Host "- $failure" -ForegroundColor Red
+}
+foreach ($warning in $Warnings) {
+    Write-Host "- $warning" -ForegroundColor Yellow
+}
+exit 1
