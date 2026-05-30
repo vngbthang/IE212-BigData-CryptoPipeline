@@ -29,7 +29,7 @@ Notes:
 - Nessie is used as the Iceberg catalog for Spark.
 - The `src/dashboard/models` folder contains runtime model copies that the dashboard loads at startup.
 - XGBoost and Isolation Forest are real, integrated model signals used by the dashboard.
-- LSTM is experimental (weak-pass) and provided as reference-only; it does not override the real integrated signals.
+- LSTM is experimental (weak-pass) and provided as reference-only inference; it does not override the real integrated signals.
 
 This is near real-time, not hard real-time. Observed dashboard lag is usually seconds to tens of seconds depending on Spark microbatches, Iceberg commits, DuckDB reads, and Streamlit refresh timing.
 
@@ -43,7 +43,7 @@ This is near real-time, not hard real-time. Observed dashboard lag is usually se
 - Streamlit dashboard renders the CryptoTerminal Pro UI, chart, KPIs, anomaly markers, and AI insight cards.
 - XGBoost real models are integrated for BTC/USDT and ETH/USDT.
 - Isolation Forest real models are integrated for BTC/USDT and ETH/USDT.
-- LSTM is integrated as `LSTM_EXPERIMENTAL_WEAK_PASS`, reference-only.
+- LSTM is integrated as `LSTM_EXPERIMENTAL_WEAK_PASS`, reference-only inference.
 - `scripts/ops/start.ps1` and `scripts/ops/status.ps1` pass in the verified demo state.
 
 ## Tech Stack
@@ -60,6 +60,11 @@ This is near real-time, not hard real-time. Observed dashboard lag is usually se
 - XGBoost
 - scikit-learn
 - TensorFlow/Keras
+ - ccxt
+ - joblib
+ - pandas
+ - numpy
+ - boto3
 
 ## Folder Structure
 
@@ -70,6 +75,9 @@ This is near real-time, not hard real-time. Observed dashboard lag is usually se
 |-- requirements-ml.txt
 |-- data/
 |   `-- ml_training_data_90days.parquet
+|-- docs/
+|   `-- images/
+|       `-- architecture.png
 |-- artifacts/
 |   |-- xgboost/
 |   |   |-- xgboost_vol_btcusdt.pkl
@@ -153,13 +161,13 @@ This is near real-time, not hard real-time. Observed dashboard lag is usually se
 
 ## ML Model Status
 
-| Model | Owner | Task | Baseline | Status | Dashboard Role |
-| --- | --- | --- | --- | --- | --- |
-| LSTM | Khoi | Close forecasting | Naive Forecast | Experimental weak pass | Reference only |
-| XGBoost | Khoa | Volatility prediction | Current/SMA volatility baseline | Accepted | Volatility risk |
-| Isolation Forest | Thang | Anomaly detection | `abs(z_score) > 3` | Integrated | Anomaly detection |
+| Model | Task | Baseline | Status | Dashboard Role |
+| --- | --- | --- | --- | --- |
+| LSTM | Close forecasting | Naive Forecast | Weak pass | Reference-only inference |
+| XGBoost | Volatility prediction | Volatility baseline | Accepted | Volatility risk |
+| Isolation Forest | Anomaly detection | `abs(z_score) > 3` | Integrated | Anomaly detection |
 
-### XGBoost - Khoa
+### XGBoost
 
 - Task: volatility prediction.
 - Real model integrated into the dashboard.
@@ -174,7 +182,7 @@ This is near real-time, not hard real-time. Observed dashboard lag is usually se
 - The dashboard uses artifact-provided `feature_columns`.
 - The dashboard uses corrected `next_zero_proxy(...)` logic consistent with training.
 
-### Isolation Forest - Thang
+### Isolation Forest
 
 - Task: unsupervised anomaly detection.
 - Real model integrated into the dashboard.
@@ -194,10 +202,10 @@ This is near real-time, not hard real-time. Observed dashboard lag is usually se
 - Dashboard `volatility_30m` is the rolling standard deviation of `log_return`, not close price.
 - Dashboard shows anomaly count and anomaly rate for the current chart view.
 
-### LSTM - Khoi
+### LSTM
 
 - Task: close price forecasting.
-- Khôi's LSTM artifacts are integrated into the dashboard as status/reference only.
+- Khôi's LSTM artifacts are integrated into the dashboard as reference-only inference.
 - Dashboard labels:
   - `LSTM_EXPERIMENTAL_WEAK_PASS (BTC/USDT)`
   - `LSTM_EXPERIMENTAL_WEAK_PASS (ETH/USDT)`
@@ -238,7 +246,7 @@ Isolation Forest is unsupervised, so dashboard anomaly counts depend on the curr
 | BTC/USDT | `34.7801` | `34.7795` | Weak pass |
 | ETH/USDT | `1.2921` | `1.2920` | Weak pass |
 
-LSTM only barely beats the naive baseline, so it is shown as experimental/reference-only rather than a strong production forecasting signal.
+LSTM only barely beats the naive baseline, so it is shown as experimental/reference-only inference rather than a strong production forecasting signal.
 
 ## Run On Windows PowerShell
 
@@ -360,7 +368,7 @@ Expected evidence:
 
 ```text
 Batch <n> written to nessie.gold.crypto_ohlcv
-numShufflePartitions : 4
+spark.sql.shuffle.partitions -> 4
 ```
 
 ### Nessie and MinIO
@@ -434,7 +442,7 @@ LSTM_EXPERIMENTAL_WEAK_PASS (ETH/USDT)
 - The dashboard scans the latest Iceberg metadata directly from MinIO using DuckDB rather than querying through Nessie APIs.
 - The project does not implement a full Bronze/Silver/Gold Medallion architecture; the verified streaming output is `nessie.gold.crypto_ohlcv`.
 - The feeder depends on Binance/network access.
-- LSTM is weak-pass experimental/reference-only and should not be described as production-ready.
+- LSTM is weak-pass experimental/reference-only inference and should not be described as production-ready.
 - ML signals are research/demo signals and are not financial advice.
 - XGBoost pickle compatibility warnings may appear in logs; they are non-blocking for the current demo.
 - Streamlit deprecation warnings may appear; they are non-blocking.
