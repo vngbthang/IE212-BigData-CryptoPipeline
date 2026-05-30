@@ -1,0 +1,208 @@
+[
+  {
+    "symbol": "BTC/USDT",
+    "row_count": 129569,
+    "feature_columns": [
+      "volume",
+      "log_returns",
+      "z_score",
+      "volatility_30m"
+    ],
+    "baseline_rule": "abs(z_score) > 3",
+    "contamination_values_tried": [
+      0.01,
+      0.02,
+      0.03,
+      0.04,
+      0.05
+    ],
+    "chosen_contamination": 0.03,
+    "evaluations": [
+      {
+        "contamination": 0.01,
+        "row_count": 129569,
+        "baseline_anomaly_count": 1856,
+        "baseline_anomaly_pct": 1.4324414018785359,
+        "isolation_anomaly_count": 1296,
+        "isolation_anomaly_pct": 1.000239254760012,
+        "overlap_count": 391,
+        "isolation_only_count": 905,
+        "baseline_only_count": 1465,
+        "isolation_only_avg_abs_z_score": 1.754489772794322,
+        "isolation_only_avg_volume_percentile": 0.9845508455594107
+      },
+      {
+        "contamination": 0.02,
+        "row_count": 129569,
+        "baseline_anomaly_count": 1856,
+        "baseline_anomaly_pct": 1.4324414018785359,
+        "isolation_anomaly_count": 2592,
+        "isolation_anomaly_pct": 2.000478509520024,
+        "overlap_count": 626,
+        "isolation_only_count": 1966,
+        "baseline_only_count": 1230,
+        "isolation_only_avg_abs_z_score": 1.598813204231739,
+        "isolation_only_avg_volume_percentile": 0.9731452332766101
+      },
+      {
+        "contamination": 0.03,
+        "row_count": 129569,
+        "baseline_anomaly_count": 1856,
+        "baseline_anomaly_pct": 1.4324414018785359,
+        "isolation_anomaly_count": 3888,
+        "isolation_anomaly_pct": 3.000717764280036,
+        "overlap_count": 779,
+        "isolation_only_count": 3109,
+        "baseline_only_count": 1077,
+        "isolation_only_avg_abs_z_score": 1.5576779016665525,
+        "isolation_only_avg_volume_percentile": 0.9641768779690827
+      },
+      {
+        "contamination": 0.04,
+        "row_count": 129569,
+        "baseline_anomaly_count": 1856,
+        "baseline_anomaly_pct": 1.4324414018785359,
+        "isolation_anomaly_count": 5183,
+        "isolation_anomaly_pct": 4.000185229491622,
+        "overlap_count": 940,
+        "isolation_only_count": 4243,
+        "baseline_only_count": 916,
+        "isolation_only_avg_abs_z_score": 1.5254730369043794,
+        "isolation_only_avg_volume_percentile": 0.9529045113685682
+      },
+      {
+        "contamination": 0.05,
+        "row_count": 129569,
+        "baseline_anomaly_count": 1856,
+        "baseline_anomaly_pct": 1.4324414018785359,
+        "isolation_anomaly_count": 6479,
+        "isolation_anomaly_pct": 5.000424484251634,
+        "overlap_count": 1073,
+        "isolation_only_count": 5406,
+        "baseline_only_count": 783,
+        "isolation_only_avg_abs_z_score": 1.5043622892804542,
+        "isolation_only_avg_volume_percentile": 0.943171578693123
+      }
+    ],
+    "chosen_metrics": {
+      "contamination": 0.03,
+      "row_count": 129569,
+      "baseline_anomaly_count": 1856,
+      "baseline_anomaly_pct": 1.4324414018785359,
+      "isolation_anomaly_count": 3888,
+      "isolation_anomaly_pct": 3.000717764280036,
+      "overlap_count": 779,
+      "isolation_only_count": 3109,
+      "baseline_only_count": 1077,
+      "isolation_only_avg_abs_z_score": 1.5576779016665525,
+      "isolation_only_avg_volume_percentile": 0.9641768779690827
+    },
+    "artifacts": {
+      "model_path": "artifacts\\isolation_forest\\isolation_forest_btcusdt.pkl",
+      "plot_path": "artifacts\\isolation_forest\\anomalies_btcusdt.png"
+    }
+  },
+  {
+    "symbol": "ETH/USDT",
+    "row_count": 129570,
+    "feature_columns": [
+      "volume",
+      "log_returns",
+      "z_score",
+      "volatility_30m"
+    ],
+    "baseline_rule": "abs(z_score) > 3",
+    "contamination_values_tried": [
+      0.01,
+      0.02,
+      0.03,
+      0.04,
+      0.05
+    ],
+    "chosen_contamination": 0.03,
+    "evaluations": [
+      {
+        "contamination": 0.01,
+        "row_count": 129570,
+        "baseline_anomaly_count": 2001,
+        "baseline_anomaly_pct": 1.544338967353554,
+        "isolation_anomaly_count": 1296,
+        "isolation_anomaly_pct": 1.0002315350775643,
+        "overlap_count": 511,
+        "isolation_only_count": 785,
+        "baseline_only_count": 1490,
+        "isolation_only_avg_abs_z_score": 1.9084696240928192,
+        "isolation_only_avg_volume_percentile": 0.9902192406141038
+      },
+      {
+        "contamination": 0.02,
+        "row_count": 129570,
+        "baseline_anomaly_count": 2001,
+        "baseline_anomaly_pct": 1.544338967353554,
+        "isolation_anomaly_count": 2592,
+        "isolation_anomaly_pct": 2.0004630701551287,
+        "overlap_count": 761,
+        "isolation_only_count": 1831,
+        "baseline_only_count": 1240,
+        "isolation_only_avg_abs_z_score": 1.7376542232815104,
+        "isolation_only_avg_volume_percentile": 0.9811747524170082
+      },
+      {
+        "contamination": 0.03,
+        "row_count": 129570,
+        "baseline_anomaly_count": 2001,
+        "baseline_anomaly_pct": 1.544338967353554,
+        "isolation_anomaly_count": 3888,
+        "isolation_anomaly_pct": 3.0006946052326926,
+        "overlap_count": 941,
+        "isolation_only_count": 2947,
+        "baseline_only_count": 1060,
+        "isolation_only_avg_abs_z_score": 1.6910277054405896,
+        "isolation_only_avg_volume_percentile": 0.9716673503249857
+      },
+      {
+        "contamination": 0.04,
+        "row_count": 129570,
+        "baseline_anomaly_count": 2001,
+        "baseline_anomaly_pct": 1.544338967353554,
+        "isolation_anomaly_count": 5183,
+        "isolation_anomaly_pct": 4.000154356718376,
+        "overlap_count": 1110,
+        "isolation_only_count": 4073,
+        "baseline_only_count": 891,
+        "isolation_only_avg_abs_z_score": 1.6504403660162823,
+        "isolation_only_avg_volume_percentile": 0.9622662599956444
+      },
+      {
+        "contamination": 0.05,
+        "row_count": 129570,
+        "baseline_anomaly_count": 2001,
+        "baseline_anomaly_pct": 1.544338967353554,
+        "isolation_anomaly_count": 6479,
+        "isolation_anomaly_pct": 5.00038589179594,
+        "overlap_count": 1265,
+        "isolation_only_count": 5214,
+        "baseline_only_count": 736,
+        "isolation_only_avg_abs_z_score": 1.6201869664584727,
+        "isolation_only_avg_volume_percentile": 0.9523598208455523
+      }
+    ],
+    "chosen_metrics": {
+      "contamination": 0.03,
+      "row_count": 129570,
+      "baseline_anomaly_count": 2001,
+      "baseline_anomaly_pct": 1.544338967353554,
+      "isolation_anomaly_count": 3888,
+      "isolation_anomaly_pct": 3.0006946052326926,
+      "overlap_count": 941,
+      "isolation_only_count": 2947,
+      "baseline_only_count": 1060,
+      "isolation_only_avg_abs_z_score": 1.6910277054405896,
+      "isolation_only_avg_volume_percentile": 0.9716673503249857
+    },
+    "artifacts": {
+      "model_path": "artifacts\\isolation_forest\\isolation_forest_ethusdt.pkl",
+      "plot_path": "artifacts\\isolation_forest\\anomalies_ethusdt.png"
+    }
+  }
+]

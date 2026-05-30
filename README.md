@@ -1,68 +1,65 @@
 # IE212 Big Data Crypto Pipeline
 
-Real-time crypto data pipeline for a Big Data course demo.
+## Near Real-time Crypto Lakehouse Pipeline with ML Signals
 
-The currently verified pipeline is:
+This repository implements a near real-time crypto data pipeline for a Big Data course demo. It streams BTC/USDT and ETH/USDT market data from Binance/ccxt into Kafka, aggregates candles with Spark Structured Streaming, writes Apache Iceberg data through Nessie into MinIO, and visualizes the latest data in a Streamlit dashboard using DuckDB.
+
+The current dashboard, **CryptoTerminal Pro**, includes integrated research/demo ML signals: real XGBoost volatility prediction, real Isolation Forest anomaly detection, and an experimental weak-pass LSTM close-price forecast shown as reference only.
+
+## Current Verified Architecture
+
+![System Architecture](docs/images/architecture.png)
+
+The architecture has two main paths:
+1. Near real-time serving pipeline:
+  Binance/ccxt -> crypto-feeder -> Kafka -> Spark Structured Streaming -> Iceberg/Nessie/MinIO -> DuckDB -> Streamlit
+
+2. Offline ML training pipeline:
+  Historical dataset -> XGBoost / Isolation Forest / LSTM training -> model artifacts -> src/dashboard/models -> Streamlit ML signals
+
+Running table:
 
 ```text
-crypto-feeder -> Kafka -> Spark Structured Streaming -> Iceberg/Nessie/MinIO -> DuckDB -> Streamlit dashboard
+nessie.gold.crypto_ohlcv
 ```
 
-This README describes the repository as it works today. It does not describe planned components as active services.
+Notes:
 
-## Project Overview
+- DuckDB reads Iceberg data from MinIO using `httpfs` + `iceberg`.
+- Nessie is used as the Iceberg catalog for Spark.
+- The `src/dashboard/models` folder contains runtime model copies that the dashboard loads at startup.
+- XGBoost and Isolation Forest are real, integrated model signals used by the dashboard.
+- LSTM is experimental (weak-pass) and provided as reference-only; it does not override the real integrated signals.
 
-The project ingests live crypto market data from Binance through the feeder container, publishes tick events to Kafka, aggregates them into OHLCV candles with Spark Structured Streaming, writes the result as an Apache Iceberg table using a Nessie catalog and MinIO object storage, and visualizes the latest candles in a Streamlit dashboard through DuckDB's Iceberg scanner.
+This is near real-time, not hard real-time. Observed dashboard lag is usually seconds to tens of seconds depending on Spark microbatches, Iceberg commits, DuckDB reads, and Streamlit refresh timing.
 
-The dashboard has ML signal sections, but the current verified state uses fallback model outputs unless real model artifacts are added.
+## What Is Verified Today
 
-## Verified Architecture
-
-```text
-+----------------+      +----------------+      +--------------------------+
-| crypto-feeder  | ---> | Kafka          | ---> | Spark Structured         |
-| simulator.py   |      | crypto_ticks   |      | Streaming                |
-+----------------+      +----------------+      +-------------+------------+
-                                                              |
-                                                              v
-                                             +----------------+-------------+
-                                             | Iceberg table                |
-                                             | nessie.gold.crypto_ohlcv    |
-                                             +----------------+-------------+
-                                                              |
-                                +-----------------------------+-------------+
-                                |                                           |
-                                v                                           v
-                         +------+-------+                           +-------+------+
-                         | Nessie       |                           | MinIO        |
-                         | catalog      |                           | S3 storage   |
-                         +--------------+                           +-------+------+
-                                                                          |
-                                                                          v
-                                                                +---------+--------+
-                                                                | DuckDB           |
-                                                                | httpfs + iceberg |
-                                                                +---------+--------+
-                                                                          |
-                                                                          v
-                                                                +---------+--------+
-                                                                | Streamlit        |
-                                                                | dashboard        |
-                                                                +------------------+
-```
+- `crypto-feeder` publishes BTC/USDT and ETH/USDT messages to Kafka topic `crypto_ticks`.
+- Kafka runs healthy under Docker Compose.
+- Spark Structured Streaming reads Kafka and writes OHLCV candles to `nessie.gold.crypto_ohlcv`.
+- Iceberg table data is stored in MinIO and tracked by Nessie.
+- DuckDB can load `httpfs` and `iceberg`, find the latest Iceberg metadata in MinIO, and read at least one candle row.
+- Streamlit dashboard renders the CryptoTerminal Pro UI, chart, KPIs, anomaly markers, and AI insight cards.
+- XGBoost real models are integrated for BTC/USDT and ETH/USDT.
+- Isolation Forest real models are integrated for BTC/USDT and ETH/USDT.
+- LSTM is integrated as `LSTM_EXPERIMENTAL_WEAK_PASS`, reference-only.
+- `scripts/ops/start.ps1` and `scripts/ops/status.ps1` pass in the verified demo state.
 
 ## Tech Stack
 
 - Python
 - Docker Compose
-- Kafka, using `confluentinc/cp-kafka:7.6.1`
-- Spark Structured Streaming
+- Apache Kafka
+- Apache Spark Structured Streaming
 - Apache Iceberg
-- Project Nessie, using `projectnessie/nessie:0.76.6`
+- Project Nessie
 - MinIO object storage
-- DuckDB with `httpfs` and `iceberg` extensions
-- Streamlit dashboard
-- Binance/ccxt feeder
+- DuckDB with `httpfs` and `iceberg`
+- Streamlit
+- XGBoost
+- scikit-learn
+- TensorFlow/Keras
 
 ## Folder Structure
 
@@ -70,6 +67,24 @@ The dashboard has ML signal sections, but the current verified state uses fallba
 .
 |-- docker-compose.yaml
 |-- README.md
+|-- requirements-ml.txt
+|-- data/
+|   `-- ml_training_data_90days.parquet
+|-- artifacts/
+|   |-- xgboost/
+|   |   |-- xgboost_vol_btcusdt.pkl
+|   |   `-- xgboost_vol_ethusdt.pkl
+|   |-- isolation_forest/
+|   |   |-- isolation_forest_btcusdt.pkl
+|   |   |-- isolation_forest_ethusdt.pkl
+|   |   |-- metrics_summary.json
+|   |   |-- anomalies_btcusdt.png
+|   |   `-- anomalies_ethusdt.png
+|   `-- LSTM/
+|       |-- lstm_btc_model.h5
+|       |-- lstm_eth_model.h5
+|       |-- scaler_btc.pkl
+|       `-- scaler_eth.pkl
 |-- simulator/
 |   |-- Dockerfile
 |   |-- requirements.txt
@@ -89,39 +104,141 @@ The dashboard has ML signal sections, but the current verified state uses fallba
 |       |-- Dockerfile
 |       |-- requirements.txt
 |       |-- app.py
-|       `-- __init__.py
+|       |-- .dockerignore
+|       `-- models/
+|           |-- xgboost_vol_btcusdt.pkl
+|           |-- xgboost_vol_ethusdt.pkl
+|           |-- isolation_forest_btcusdt.pkl
+|           |-- isolation_forest_ethusdt.pkl
+|           |-- lstm_btc_model.h5
+|           |-- lstm_eth_model.h5
+|           |-- scaler_btc.pkl
+|           `-- scaler_eth.pkl
 |-- scripts/
-|   `-- helper scripts
-`-- docs/
-    `-- images/
+|   `-- ops/
+|       |-- start.ps1
+|       |-- status.ps1
+|       |-- logs.ps1
+|       |-- stop.ps1
+|       `-- reset-checkpoint.ps1
+|-- xgboost_volatility_pipeline.py
+|-- isolation_forest_anomaly_pipeline.py
+`-- lstm_ml.ipynb
 ```
 
 ## Data Flow
 
-1. `crypto-feeder` reads live Binance market data with ccxt.
+1. `crypto-feeder` reads live Binance market data through ccxt.
 2. The feeder publishes tick messages to Kafka topic `crypto_ticks`.
-3. Spark reads `crypto_ticks` as a streaming source.
-4. Spark parses tick data and aggregates it into OHLCV candles.
-5. Spark writes the candle table to Iceberg as `nessie.gold.crypto_ohlcv`.
-6. Iceberg data and metadata are stored in MinIO under the `warehouse` bucket.
+3. Spark Structured Streaming reads from Kafka.
+4. Spark parses the tick stream and aggregates OHLCV candles.
+5. Spark writes candles to Apache Iceberg table `nessie.gold.crypto_ohlcv`.
+6. Iceberg table data and metadata are stored in MinIO under the `warehouse` bucket.
 7. Nessie tracks the Iceberg catalog state.
-8. The dashboard uses boto3 to find the newest Iceberg metadata file in MinIO.
-9. DuckDB loads `httpfs` and `iceberg`, scans that metadata with `iceberg_scan(...)`, and returns candle rows.
-10. Streamlit renders the latest candles, KPI sections, and fallback ML signal widgets.
+8. The dashboard finds the newest Iceberg metadata file in MinIO.
+9. DuckDB loads `httpfs` and `iceberg`, then reads data with `iceberg_scan(...)`.
+10. Streamlit renders CryptoTerminal Pro: KPIs, chart, volume, anomaly markers, AI insight cards, and technical proof tabs.
 
 ## Docker Compose Services
 
-| Compose service | Container name | Purpose | Port |
+| Service | Container | Purpose | Ports |
 | --- | --- | --- | --- |
 | `catalog` | `catalog` | Nessie catalog | internal `19120` |
 | `storage` | `storage` | MinIO object storage | `9000`, `9001` |
-| `mc` | `mc` | MinIO bucket initialization | none |
+| `mc` | `mc` | MinIO bucket setup | none |
 | `kafka` | `kafka` | Kafka broker and topic setup | `9092` |
 | `spark` | `spark-master` | Spark streaming job | `4040`, `7077` |
 | `crypto-feeder` | `crypto-feeder` | Binance/ccxt Kafka producer | none |
 | `dashboard` | `crypto-dashboard` | Streamlit dashboard | `8501` |
 
-Services currently verified as part of the running stack: `catalog`, `storage`, `mc`, `kafka`, `spark`, `crypto-feeder`, and `dashboard`.
+## ML Model Status
+
+| Model | Owner | Task | Baseline | Status | Dashboard Role |
+| --- | --- | --- | --- | --- | --- |
+| LSTM | Khoi | Close forecasting | Naive Forecast | Experimental weak pass | Reference only |
+| XGBoost | Khoa | Volatility prediction | Current/SMA volatility baseline | Accepted | Volatility risk |
+| Isolation Forest | Thang | Anomaly detection | `abs(z_score) > 3` | Integrated | Anomaly detection |
+
+### XGBoost - Khoa
+
+- Task: volatility prediction.
+- Real model integrated into the dashboard.
+- Dashboard labels:
+  - `XGBoost_REAL_MODEL (BTC/USDT)`
+  - `XGBoost_REAL_MODEL (ETH/USDT)`
+- Artifacts:
+  - `artifacts/xgboost/xgboost_vol_btcusdt.pkl`
+  - `artifacts/xgboost/xgboost_vol_ethusdt.pkl`
+  - `src/dashboard/models/xgboost_vol_btcusdt.pkl`
+  - `src/dashboard/models/xgboost_vol_ethusdt.pkl`
+- The dashboard uses artifact-provided `feature_columns`.
+- The dashboard uses corrected `next_zero_proxy(...)` logic consistent with training.
+
+### Isolation Forest - Thang
+
+- Task: unsupervised anomaly detection.
+- Real model integrated into the dashboard.
+- Dashboard labels:
+  - `IsoForest_REAL_MODEL (BTC/USDT)`
+  - `IsoForest_REAL_MODEL (ETH/USDT)`
+- Artifacts:
+  - `artifacts/isolation_forest/isolation_forest_btcusdt.pkl`
+  - `artifacts/isolation_forest/isolation_forest_ethusdt.pkl`
+  - `artifacts/isolation_forest/metrics_summary.json`
+  - `artifacts/isolation_forest/anomalies_btcusdt.png`
+  - `artifacts/isolation_forest/anomalies_ethusdt.png`
+  - `src/dashboard/models/isolation_forest_btcusdt.pkl`
+  - `src/dashboard/models/isolation_forest_ethusdt.pkl`
+- Features: `volume`, `log_returns`, `z_score`, `volatility_30m`.
+- Contamination: `0.03`.
+- Dashboard `volatility_30m` is the rolling standard deviation of `log_return`, not close price.
+- Dashboard shows anomaly count and anomaly rate for the current chart view.
+
+### LSTM - Khoi
+
+- Task: close price forecasting.
+- Khôi's LSTM artifacts are integrated into the dashboard as status/reference only.
+- Dashboard labels:
+  - `LSTM_EXPERIMENTAL_WEAK_PASS (BTC/USDT)`
+  - `LSTM_EXPERIMENTAL_WEAK_PASS (ETH/USDT)`
+- Artifacts:
+  - `artifacts/LSTM/lstm_btc_model.h5`
+  - `artifacts/LSTM/lstm_eth_model.h5`
+  - `artifacts/LSTM/scaler_btc.pkl`
+  - `artifacts/LSTM/scaler_eth.pkl`
+  - `src/dashboard/models/lstm_btc_model.h5`
+  - `src/dashboard/models/lstm_eth_model.h5`
+  - `src/dashboard/models/scaler_btc.pkl`
+  - `src/dashboard/models/scaler_eth.pkl`
+- Model shape: input `(None, 60, 2)`, output `(None, 1)`.
+- LSTM is not production-ready and does not override XGBoost or Isolation Forest outputs.
+
+## ML Metrics
+
+### XGBoost
+
+| Symbol | Baseline Test RMSE | XGBoost Test RMSE | Status |
+| --- | ---: | ---: | --- |
+| BTC/USDT | `2.3631859713898763e-05` | `1.767691660057757e-05` | Passed baseline |
+| ETH/USDT | `4.116352038788613e-05` | `3.043713735124203e-05` | Passed baseline |
+
+### Isolation Forest
+
+| Symbol | Contamination | Baseline | Dashboard Result |
+| --- | ---: | --- | --- |
+| BTC/USDT | `0.03` | `abs(z_score) > 3` | View-dependent anomaly count/rate |
+| ETH/USDT | `0.03` | `abs(z_score) > 3` | View-dependent anomaly count/rate |
+
+Isolation Forest is unsupervised, so dashboard anomaly counts depend on the currently loaded candle window.
+
+### LSTM
+
+| Symbol | Baseline RMSE | LSTM RMSE | Interpretation |
+| --- | ---: | ---: | --- |
+| BTC/USDT | `34.7801` | `34.7795` | Weak pass |
+| ETH/USDT | `1.2921` | `1.2920` | Weak pass |
+
+LSTM only barely beats the naive baseline, so it is shown as experimental/reference-only rather than a strong production forecasting signal.
 
 ## Run On Windows PowerShell
 
@@ -134,7 +251,7 @@ docker compose up -d
 docker compose ps
 ```
 
-Open the dashboard:
+Open:
 
 ```text
 http://localhost:8501/
@@ -148,105 +265,62 @@ MinIO console:       http://localhost:9001/    user: admin, password: password
 Spark UI:            http://localhost:4040/
 ```
 
-## Operational Scripts
+## Reliable Demo Startup
 
-PowerShell helper scripts are available under `scripts/ops/`.
-
-Available scripts:
+After Docker Desktop restarts, start the full stack with:
 
 ```powershell
-.\scripts\ops\start.ps1
-.\scripts\ops\status.ps1
-.\scripts\ops\logs.ps1
-.\scripts\ops\stop.ps1
-.\scripts\ops\reset-checkpoint.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\start.ps1
 ```
 
-Run them from the repository root. Direct execution works when local PowerShell script execution is allowed:
+Do not open only the dashboard after a Docker restart. The dashboard may still read old Iceberg data from MinIO even when Kafka, Spark, Nessie, or the feeder are not active.
 
-```powershell
-.\scripts\ops\status.ps1
-```
-
-If PowerShell blocks script execution, use a process-scoped execution policy bypass:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\ops\status.ps1
-```
-
-Script purposes:
-
-- `start.ps1`: validates Compose config, builds images, starts the stack, and prints service status.
-- `status.ps1`: shows Compose status, checks catalog/storage/Kafka health, looks for Spark writes to `nessie.gold.crypto_ohlcv`, verifies a real Iceberg row through DuckDB in the dashboard container, and checks whether the dashboard responds at `http://localhost:8501`.
-- `logs.ps1`: prints useful recent logs for `crypto-feeder`, `spark`, `dashboard`, `catalog`, and `kafka`.
-- `stop.ps1`: stops Compose services without deleting volumes, MinIO data, Iceberg data, or Nessie data.
-- `reset-checkpoint.ps1`: deletes only the Spark OHLCV streaming checkpoint at `s3a://warehouse/checkpoints/ohlcv/` using the MinIO path `minio/warehouse/checkpoints/ohlcv`, then restarts Spark. Use this when Spark keeps old streaming settings from a previous checkpoint.
-
-Recommended daily/demo workflow:
+If the dashboard shows `Stalled`, run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\ops\start.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\ops\status.ps1
 ```
 
-Then open:
+Use `reset-checkpoint.ps1` only for Spark checkpoint/state recovery.
 
-```text
-http://localhost:8501
-```
+## Operational Scripts
 
-For debugging:
+| Script | Purpose |
+| --- | --- |
+| `scripts/ops/start.ps1` | Validates Compose config, builds images, starts the full stack, waits for core service health, checks feeder output, checks Spark writes, and checks dashboard HTTP 200. |
+| `scripts/ops/status.ps1` | Shows service status, checks catalog/storage/Kafka health, checks Spark write evidence, performs a real DuckDB/Iceberg row read from the dashboard container, and checks dashboard reachability. |
+| `scripts/ops/logs.ps1` | Prints useful recent logs for `crypto-feeder`, `spark`, `dashboard`, `catalog`, and `kafka`. |
+| `scripts/ops/stop.ps1` | Stops services without deleting volumes, MinIO data, Iceberg data, or Nessie data. |
+| `scripts/ops/reset-checkpoint.ps1` | Deletes only the Spark OHLCV streaming checkpoint and restarts Spark. |
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\ops\logs.ps1
-```
-
-When finished:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\ops\stop.ps1
-```
-
-Recovery workflow:
-
-Use `reset-checkpoint.ps1` only when Spark streaming checkpoint/state causes issues, such as old streaming settings being preserved after a config change.
+Direct execution:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\ops\reset-checkpoint.ps1
+.\scripts\ops\status.ps1
 ```
 
-This deletes only:
+If PowerShell blocks scripts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\status.ps1
+```
+
+Manual checkpoint recovery deletes only:
 
 ```text
 s3a://warehouse/checkpoints/ohlcv/
 minio/warehouse/checkpoints/ohlcv
 ```
 
-It does not delete:
-
-- Iceberg table data
-- Nessie catalog data
-- MinIO warehouse data
-- Docker volumes
-
-The operational scripts were verified in this repository state:
-
-```text
-start.ps1 PASS
-status.ps1 PASS
-logs.ps1 PASS
-stop.ps1 PASS
-restart after stop PASS
-reset-checkpoint.ps1 PASS
-final status.ps1 PASS
-```
+It does not delete Iceberg table data, Nessie catalog data, MinIO warehouse data, or Docker volumes.
 
 ## Verify Each Layer
 
-### 1. Feeder
+### Feeder
 
 ```powershell
-docker compose logs --tail 80 crypto-feeder
+docker compose logs --tail 100 crypto-feeder
 ```
 
 Expected evidence:
@@ -256,15 +330,13 @@ Kafka BTC/USDT
 Kafka ETH/USDT
 ```
 
-or similar messages showing live symbols being published.
-
-### 2. Kafka
+### Kafka
 
 ```powershell
 docker compose ps kafka
 ```
 
-Expected state: the `kafka` service is running and healthy.
+Expected state: `kafka` is running and healthy.
 
 Optional topic check:
 
@@ -278,48 +350,34 @@ Expected topic:
 crypto_ticks
 ```
 
-### 3. Spark Structured Streaming
+### Spark Structured Streaming
 
 ```powershell
-docker compose logs --tail 150 spark
+docker compose logs --tail 200 spark
 ```
 
 Expected evidence:
 
 ```text
-spark.sql.shuffle.partitions -> 4
-Batch 0 written to nessie.gold.crypto_ohlcv
+Batch <n> written to nessie.gold.crypto_ohlcv
+numShufflePartitions : 4
 ```
 
-Later batch numbers are also valid.
-
-### 4. Nessie, Iceberg, and MinIO
+### Nessie and MinIO
 
 ```powershell
 docker compose ps catalog storage
 ```
 
-Expected state: `catalog` and `storage` are running and healthy.
+Expected state: both services are running and healthy.
 
-Spark logs should show successful writes to:
-
-```text
-nessie.gold.crypto_ohlcv
-```
-
-Iceberg metadata is stored in MinIO under a path similar to:
-
-```text
-s3://warehouse/gold/crypto_ohlcv_<uuid>/metadata/<version>.metadata.json
-```
-
-### 5. Dashboard
+### Dashboard
 
 ```powershell
-docker compose logs --tail 120 dashboard
+docker compose logs --tail 150 dashboard
 ```
 
-Expected evidence: no critical errors related to DuckDB, `httpfs`, Iceberg, S3 credentials, missing metadata, or empty query results.
+Expected state: no critical errors for DuckDB, `httpfs`, `iceberg`, S3 credentials, missing metadata, or Streamlit crash.
 
 Open:
 
@@ -327,196 +385,100 @@ Open:
 http://localhost:8501/
 ```
 
-Expected UI:
+### DuckDB/Iceberg Data Check
 
-- Page loads without a Streamlit crash.
-- Latest candle timestamp is visible.
-- Candlestick/price chart renders.
-- Volume or KPI sections render.
-
-### 6. Optional DuckDB/Iceberg Query Verification
-
-This verifies the dashboard container can load DuckDB extensions, find the latest Iceberg metadata in MinIO, and read at least one candle row.
+The status script performs the recommended data check:
 
 ```powershell
-@'
-import os
-import boto3
-import duckdb
-
-endpoint = os.getenv('MINIO_ENDPOINT', 'storage:9000')
-bucket = os.getenv('MINIO_BUCKET', 'warehouse')
-access = os.getenv('MINIO_ACCESS_KEY', 'admin')
-secret = os.getenv('MINIO_SECRET_KEY', 'password')
-
-s3 = boto3.client(
-    's3',
-    endpoint_url=f'http://{endpoint}',
-    aws_access_key_id=access,
-    aws_secret_access_key=secret,
-    region_name='us-east-1',
-)
-
-resp = s3.list_objects_v2(Bucket=bucket, Prefix='gold/', Delimiter='/')
-prefixes = [
-    p['Prefix'].rstrip('/')
-    for p in resp.get('CommonPrefixes', [])
-    if 'crypto_ohlcv' in p['Prefix']
-]
-
-metas = []
-for prefix in prefixes:
-    meta_resp = s3.list_objects_v2(Bucket=bucket, Prefix=f'{prefix}/metadata/')
-    metas.extend(
-        obj for obj in meta_resp.get('Contents', [])
-        if obj['Key'].endswith('.metadata.json')
-    )
-
-if not metas:
-    raise SystemExit('No Iceberg metadata files found')
-
-metas.sort(key=lambda obj: obj['LastModified'], reverse=True)
-metadata_uri = f"s3://{bucket}/{metas[0]['Key']}"
-
-conn = duckdb.connect(':memory:')
-conn.execute('LOAD httpfs;')
-conn.execute('LOAD iceberg;')
-conn.execute(f"SET s3_endpoint='{endpoint}';")
-conn.execute(f"SET s3_access_key_id='{access}';")
-conn.execute(f"SET s3_secret_access_key='{secret}';")
-conn.execute("SET s3_url_style='path';")
-conn.execute("SET s3_use_ssl=false;")
-conn.execute("SET s3_region='us-east-1';")
-
-rows = conn.execute(f"""
-    SELECT symbol, window_start, open, high, low, close, volume
-    FROM iceberg_scan('{metadata_uri}')
-    ORDER BY window_start DESC
-    LIMIT 1
-""").fetchall()
-
-print('row_count=', len(rows))
-print('rows=', rows)
-'@ | docker compose exec -T dashboard python -
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\status.ps1
 ```
 
-Expected result:
+Expected evidence:
 
 ```text
-row_count= 1
+PASS: DuckDB can read at least one Iceberg candle row
 ```
 
-or a larger non-zero result if the query is changed to return more rows.
+## Dashboard Guide
+
+CryptoTerminal Pro shows:
+
+- Pipeline status: running/stalled from dashboard-side latest candle freshness.
+- Latest data timestamp.
+- Observed lag.
+- Selected symbol.
+- Latest close price.
+- Candlestick/price chart and volume.
+- Isolation Forest anomaly markers.
+- AI insight cards for XGBoost, Isolation Forest, and LSTM.
+- Technical details tabs:
+  - Pipeline Details
+  - Model Evaluation
+  - Architecture
+  - Raw OHLCV
+
+Model status labels to expect:
+
+```text
+XGBoost_REAL_MODEL (BTC/USDT)
+XGBoost_REAL_MODEL (ETH/USDT)
+IsoForest_REAL_MODEL (BTC/USDT)
+IsoForest_REAL_MODEL (ETH/USDT)
+LSTM_EXPERIMENTAL_WEAK_PASS (BTC/USDT)
+LSTM_EXPERIMENTAL_WEAK_PASS (ETH/USDT)
+```
 
 ## Known Limitations
 
-- ML models are fallback only unless real model artifacts are added and wired into the dashboard.
-- The dashboard reads the latest Iceberg metadata directly from MinIO and scans it with DuckDB. It does not query the table through Nessie catalog APIs.
-- The current verified streaming output is the Iceberg table `nessie.gold.crypto_ohlcv`. Do not assume a full Bronze/Silver/Gold lakehouse is implemented unless the code is extended.
-- Streamlit logs currently include deprecation warnings for `use_container_width`; these warnings do not block the dashboard.
-- The feeder depends on network access to Binance. If Binance or outbound network access is unavailable, the feeder cannot produce live data.
+- This is near real-time, not hard real-time.
+- The dashboard scans the latest Iceberg metadata directly from MinIO using DuckDB rather than querying through Nessie APIs.
+- The project does not implement a full Bronze/Silver/Gold Medallion architecture; the verified streaming output is `nessie.gold.crypto_ohlcv`.
+- The feeder depends on Binance/network access.
+- LSTM is weak-pass experimental/reference-only and should not be described as production-ready.
+- ML signals are research/demo signals and are not financial advice.
+- XGBoost pickle compatibility warnings may appear in logs; they are non-blocking for the current demo.
+- Streamlit deprecation warnings may appear; they are non-blocking.
+- Port `8501` can conflict with unrelated local Streamlit processes.
 
 ## Troubleshooting
 
 ### Docker daemon is not running
 
-Symptom:
-
-```text
-Cannot connect to the Docker daemon
-```
-
-Fix:
-
-Start Docker Desktop, wait until it reports that the engine is running, then retry:
+Start Docker Desktop, wait for the engine, then run:
 
 ```powershell
 docker compose ps
 ```
 
-### Nessie image pull or tag issue
+### Dashboard shows Stalled
 
-Symptom:
-
-```text
-projectnessie/nessie:<tag>: not found
-```
-
-The current verified image is:
-
-```text
-projectnessie/nessie:0.76.6
-```
-
-Validate and pull only the catalog image:
+Start the full stack and verify status:
 
 ```powershell
-docker compose config
-docker compose pull catalog
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\start.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\status.ps1
 ```
 
 ### DuckDB extension issue
 
-Symptom:
-
-```text
-LOAD httpfs failed
-LOAD iceberg failed
-```
-
-The dashboard image pre-installs DuckDB extensions during build. Rebuild the dashboard image with network access:
+Rebuild the dashboard image with network access:
 
 ```powershell
 docker compose build dashboard
 docker compose run --rm --no-deps dashboard python -c "import duckdb; c=duckdb.connect(':memory:'); c.execute('LOAD httpfs;'); c.execute('LOAD iceberg;'); print('duckdb extensions loaded')"
 ```
 
-### Spark checkpoint preserves old configs
+### Spark checkpoint preserves old config
 
-Symptom:
-
-```text
-spark.sql.shuffle.partitions -> 200
-```
-
-The current Spark config sets:
-
-```text
-spark.sql.shuffle.partitions -> 4
-```
-
-If logs still show `200`, reset only the streaming checkpoint for the OHLCV query. Do not delete the Iceberg warehouse or Nessie/MinIO data.
-
-The verified checkpoint path for the current query is:
-
-```text
-s3a://warehouse/checkpoints/ohlcv/
-```
-
-Equivalent MinIO path:
-
-```text
-minio/warehouse/checkpoints/ohlcv
-```
-
-Safe targeted reset:
+If Spark logs show old streaming settings, reset only the OHLCV checkpoint:
 
 ```powershell
-docker compose stop spark
-docker compose run --rm --entrypoint /bin/sh mc -c "mc alias set minio http://storage:9000 admin password && mc rm --recursive --force minio/warehouse/checkpoints/ohlcv"
-docker compose up -d spark
-docker compose logs --tail 200 spark
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\reset-checkpoint.ps1
 ```
 
-### Binance or network access issue
+Do not run `docker compose down -v` for normal recovery.
 
-Symptom:
-
-```text
-Binance cannot be reached
-```
-
-or feeder logs show repeated exchange/network errors.
+### Binance or network issue
 
 Check feeder logs:
 
@@ -524,14 +486,28 @@ Check feeder logs:
 docker compose logs --tail 120 crypto-feeder
 ```
 
-The current feeder uses live Binance/ccxt behavior. It does not currently switch to a fake simulator when Binance is unavailable.
+The feeder uses live Binance/ccxt behavior and does not automatically switch to a fake simulator.
+
+### Port 8501 conflict
+
+Check which process owns the port:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8501
+```
+
+Stop only unrelated local Streamlit processes if they conflict with the Docker dashboard.
 
 ## Current Demo Readiness
 
-The project is ready for a course demo of the verified streaming data engineering pipeline:
+The project is ready for a Big Data course demo as a near real-time crypto lakehouse pipeline with integrated ML research/demo signals:
 
 ```text
-crypto-feeder -> Kafka -> Spark Structured Streaming -> Iceberg/Nessie/MinIO -> DuckDB -> Streamlit
+Binance/ccxt -> crypto-feeder -> Kafka -> Spark Structured Streaming -> Iceberg/Nessie/MinIO -> DuckDB -> Streamlit
 ```
 
-For the demo, describe the ML widgets as fallback/demo signals unless real model artifacts are added.
+Recommended demo command:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\start.ps1
+```

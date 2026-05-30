@@ -9,3 +9,11 @@ __pycache__
 .streamlit
 models/*.h5
 models/*.pkl
+!models/lstm_btc_model.h5
+!models/lstm_eth_model.h5
+!models/scaler_btc.pkl
+!models/scaler_eth.pkl
+!models/xgboost_vol_btcusdt.pkl
+!models/xgboost_vol_ethusdt.pkl
+!models/isolation_forest_btcusdt.pkl
+!models/isolation_forest_ethusdt.pkl
