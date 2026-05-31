@@ -1,0 +1,29 @@
+﻿
+== Compose Services ==
+NAME               IMAGE                                        COMMAND                  SERVICE         CREATED              STATUS                        PORTS
+catalog            projectnessie/nessie:0.76.6                  "/usr/local/s2i/run"     catalog         6 days ago           Up About a minute (healthy)   8080/tcp, 8443/tcp, 19120/tcp
+crypto-dashboard   ie212-bigdata-cryptopipeline-dashboard       "streamlit run app.pΓÇª"   dashboard       About a minute ago   Up 58 seconds                 0.0.0.0:8501->8501/tcp, [::]:8501->8501/tcp
+crypto-feeder      ie212-bigdata-cryptopipeline-crypto-feeder   "python simulator.py"    crypto-feeder   About a minute ago   Up About a minute             
+kafka              confluentinc/cp-kafka:7.6.1                  "bash -c '/etc/conflΓÇª"   kafka           6 days ago           Up About a minute (healthy)   0.0.0.0:9092->9092/tcp, [::]:9092->9092/tcp
+spark-master       ie212-bigdata-cryptopipeline-spark           "/opt/entrypoint.sh ΓÇª"   spark           About a minute ago   Up 58 seconds                 0.0.0.0:4040->4040/tcp, [::]:4040->4040/tcp, 0.0.0.0:7077->7077/tcp, [::]:7077->7077/tcp
+storage            minio/minio                                  "/usr/bin/docker-entΓÇª"   storage         6 days ago           Up About a minute (healthy)   0.0.0.0:9000-9001->9000-9001/tcp, [::]:9000-9001->9000-9001/tcp
+
+== Health Checks ==
+catalog health: healthy
+storage health: healthy
+kafka health: healthy
+
+== Spark Iceberg Writes ==
+Spark writes: found
+
+== Iceberg Data Check ==
+metadata=s3://warehouse/gold/crypto_ohlcv_59c13ad6-b180-4e03-b37b-8b1abce9a275/metadata/00040-b0c9b0a3-bee9-40f2-b35a-7580907601e9.metadata.json
+row_count=1
+PASS: DuckDB can read at least one Iceberg candle row
+Iceberg data check: PASS
+
+== Dashboard ==
+Dashboard reachable: HTTP 200
+
+== Summary ==
+STATUS PASS: all required checks passed

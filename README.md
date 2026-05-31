@@ -8,7 +8,7 @@ The current dashboard, **CryptoTerminal Pro**, includes integrated research/demo
 
 ## Current Verified Architecture
 
-![System Architecture](docs/images/architecture.png)
+![System Architecture](docs/images/architecture_prettier.png)
 
 The architecture has two main paths:
 1. Near real-time serving pipeline:
