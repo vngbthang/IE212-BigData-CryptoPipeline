@@ -202,17 +202,47 @@ except Exception as exc:
     sys.exit(1)
 '@
 
-    try {
-        $dataCheckScript | docker compose exec -T dashboard python -
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "Iceberg data check: PASS"
+    $maxDataCheckAttempts = 5
+    $dataCheckDelaySeconds = 5
+    $dataCheckPassed = $false
+    $lastDataCheckExitCode = $null
+    $lastDataCheckOutput = $null
+
+    for ($attempt = 1; $attempt -le $maxDataCheckAttempts; $attempt++) {
+        Write-Host "Iceberg data check attempt $attempt/$maxDataCheckAttempts"
+
+        $oldPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $lastDataCheckOutput = $dataCheckScript | docker compose exec -T dashboard python - 2>&1
+            $lastDataCheckExitCode = $LASTEXITCODE
         }
-        else {
-            Add-Failure "Iceberg data check failed with exit code $LASTEXITCODE"
+        catch {
+            $lastDataCheckOutput = @("Iceberg data check command failed before completion: $($_.Exception.Message)")
+            $lastDataCheckExitCode = 1
+        }
+        finally {
+            $ErrorActionPreference = $oldPreference
+        }
+
+        if ($lastDataCheckOutput) {
+            $lastDataCheckOutput | ForEach-Object { Write-Host $_ }
+        }
+
+        if ($lastDataCheckExitCode -eq 0) {
+            Write-Host "Iceberg data check: PASS"
+            $dataCheckPassed = $true
+            break
+        }
+
+        if ($attempt -lt $maxDataCheckAttempts) {
+            Write-Host "Iceberg data check failed transiently; retrying in $dataCheckDelaySeconds seconds..." -ForegroundColor Yellow
+            Start-Sleep -Seconds $dataCheckDelaySeconds
         }
     }
-    catch {
-        Add-Failure "Iceberg data check could not be executed: $($_.Exception.Message)"
+
+    if (-not $dataCheckPassed) {
+        Add-Failure "Iceberg data check failed after $maxDataCheckAttempts attempts with exit code $lastDataCheckExitCode"
     }
 }
 else {
